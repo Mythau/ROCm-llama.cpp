@@ -1470,6 +1470,16 @@ struct ggml_backend_cuda_context {
     std::string name;
     cudaEvent_t copy_event = nullptr;
 
+    // Optional per-evaluation reuse of Q8_1-quantized activations.
+    struct luce_q8_memo_entry {
+        const void * src1_node = nullptr;
+        const void * src1_data = nullptr;
+        int          src0_type = 0;
+        int64_t      ne[4] = {0, 0, 0, 0};
+        std::unique_ptr<ggml_cuda_pool_alloc<char>> buf;
+    };
+    std::vector<luce_q8_memo_entry> luce_q8_memo;
+
     cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
     cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
 

@@ -4207,6 +4207,11 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 
     ggml_cuda_set_device(cuda_ctx->device);
 
+    // Pool allocations must be released in reverse order before the next evaluation.
+    while (!cuda_ctx->luce_q8_memo.empty()) {
+        cuda_ctx->luce_q8_memo.pop_back();
+    }
+
     bool use_cuda_graph             = false;
     bool cuda_graph_update_required = false;
     const void * graph_key = nullptr;
