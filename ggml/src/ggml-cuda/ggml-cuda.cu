@@ -2533,7 +2533,7 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
             // are stream-sync-free and safe to capture; only the sort-based
             // fallback requires a stream synchronize.
             const bool mmid_mmvq_ok = ggml_is_quantized(node->src[0]->type) &&
-                node->ne[2] <= MMVQ_MAX_MOE_BATCH_SIZE &&
+                node->ne[2] <= MMVQ_MAX_BATCH_SIZE &&
                 node->ne[2] <= mmvq_mmid_max;
             const bool mmid_mmq_ok = ggml_is_quantized(node->src[0]->type) &&
                 ggml_cuda_should_use_mmq(node->src[0]->type, cc,
