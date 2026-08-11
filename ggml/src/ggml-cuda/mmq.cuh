@@ -898,16 +898,24 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
     float sum[J*I / (nwarps*warp_size)] = {0.0f};
 
     constexpr int sz = sizeof(block_q8_1_mmq) / sizeof(int);
+    constexpr bool lucebox_ytile_use_int2 = (J * MMQ_TILE_Y_K % (2 * nwarps * warp_size)) == 0;
 
     for (int kb0 = kb0_start; kb0 < kb0_stop; kb0 += blocks_per_iter) {
         load_tiles(x, tile_x, offset_x + kb0, tile_x_max_i, stride_row_x);
         {
             const int * by0 = y + ncols_y * (kb0 * qk / ne_block) * sz;
+            if constexpr (lucebox_ytile_use_int2) {
 #pragma unroll
-            for (int l0 = 0; l0 < J * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
-                int l = l0 + threadIdx.y*warp_size + threadIdx.x;
-
-                tile_y[l] = by0[l];
+                for (int l0 = 0; l0 < J * MMQ_TILE_Y_K / 2; l0 += nwarps * warp_size) {
+                    const int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+                    reinterpret_cast<int2 *>(tile_y)[l] = reinterpret_cast<const int2 *>(by0)[l];
+                }
+            } else {
+#pragma unroll
+                for (int l0 = 0; l0 < J * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
+                    const int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+                    tile_y[l] = by0[l];
+                }
             }
         }
 
@@ -919,11 +927,18 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
         {
             const int * by0 = y + ncols_y * ((kb0 * qk / ne_block) * sz + sz);
+            if constexpr (lucebox_ytile_use_int2) {
 #pragma unroll
-            for (int l0 = 0; l0 < J * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
-                int l = l0 + threadIdx.y*warp_size + threadIdx.x;
-
-                tile_y[l] = by0[l];
+                for (int l0 = 0; l0 < J * MMQ_TILE_Y_K / 2; l0 += nwarps * warp_size) {
+                    const int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+                    reinterpret_cast<int2 *>(tile_y)[l] = reinterpret_cast<const int2 *>(by0)[l];
+                }
+            } else {
+#pragma unroll
+                for (int l0 = 0; l0 < J * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
+                    const int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+                    tile_y[l] = by0[l];
+                }
             }
         }
 
