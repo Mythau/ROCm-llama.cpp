@@ -9,6 +9,8 @@ commits. It is expected to be minimally maintained. There are no release builds,
 support guarantees, compatibility promises, or claim that every patch is
 appropriate for upstream llama.cpp.
 
+That's a nice way of saying this is LLM slop and I'm proud of it.
+
 ## Tested hardware and software
 
 The current branch was built and exercised on Windows with:
