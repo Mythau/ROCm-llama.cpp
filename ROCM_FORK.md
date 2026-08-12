@@ -24,6 +24,9 @@ The current branch was built and exercised on Windows with:
 Other GPUs, ROCm versions, operating systems, models, quantizations, and cache
 types have not been established by this local test campaign.
 
+Sanitized results and methodology are available in
+[`benchmarks/rocm-yolo`](benchmarks/rocm-yolo/README.md).
+
 ## What is in the branch
 
 The commit history intentionally preserves the changes as separate commits so

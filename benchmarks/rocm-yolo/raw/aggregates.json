@@ -1,0 +1,102 @@
+{
+  "schema": "rocm-yolo-sanitized-aggregates-v1",
+  "date": "2026-08-12",
+  "units": {
+    "throughput": "tokens_per_second",
+    "latency": "milliseconds"
+  },
+  "single_request_8k_no_spec": [
+    {
+      "build": "mainline-704485942",
+      "runs": 3,
+      "prefill_values": [4228.10939200799, 4229.17677669823, 4237.16101935998],
+      "prefill_mean": 4231.482396022067
+    },
+    {
+      "build": "pr-26856-archived",
+      "runs": 3,
+      "prefill_values": [4308.21627119464, 4285.58125811524, 4297.12703067053],
+      "prefill_mean": 4296.974853326804
+    },
+    {
+      "build": "rocm-yolo",
+      "runs": 1,
+      "run_kind": "warm",
+      "prefill_values": [4890.79298667928],
+      "prefill_mean": 4890.79298667928,
+      "decode_mean": 73.4267531612068
+    }
+  ],
+  "four_slot_b8192_u1024": [
+    {
+      "speculation": "none",
+      "measured_waves": 3,
+      "clean_waves": 3,
+      "aggregate_prefill_mean": 4735.718858973278,
+      "active_decode_mean": 168.91992959131554,
+      "end_to_end_generated_mean": 160.45732831711643
+    },
+    {
+      "speculation": "mtp",
+      "measured_waves": 3,
+      "clean_waves": 2,
+      "aggregate_prefill_mean": 4280.307605288623,
+      "active_decode_mean": 170.93696217867503,
+      "end_to_end_generated_mean": 161.4783460969358
+    },
+    {
+      "speculation": "ngram-mod",
+      "measured_waves": 3,
+      "clean_waves": 1,
+      "aggregate_prefill_mean": 4623.119552782365,
+      "active_decode_mean": 141.62442294297318,
+      "end_to_end_generated_mean": 135.58630651902737
+    },
+    {
+      "speculation": "mtp+ngram-mod",
+      "measured_waves": 3,
+      "clean_waves": 1,
+      "aggregate_prefill_mean": 4160.686094824832,
+      "active_decode_mean": 147.63415367351436,
+      "end_to_end_generated_mean": 140.47518609394263
+    }
+  ],
+  "synchronized_b2048_u512": [
+    { "slots": 2, "speculation": "none", "aggregate_prefill": 4110.0, "active_decode": 118.99, "end_to_end_generated": 114.28 },
+    { "slots": 2, "speculation": "ngram-mod", "aggregate_prefill": 4090.5, "active_decode": 106.38, "end_to_end_generated": 102.57 },
+    { "slots": 2, "speculation": "mtp", "aggregate_prefill": 3400.7, "active_decode": 138.24, "end_to_end_generated": 130.57 },
+    { "slots": 2, "speculation": "mtp+ngram-mod", "aggregate_prefill": 3338.3, "active_decode": 123.91, "end_to_end_generated": 117.68 },
+    { "slots": 4, "speculation": "none", "aggregate_prefill": 3870.6, "active_decode": 159.47, "end_to_end_generated": 154.69 },
+    { "slots": 4, "speculation": "ngram-mod", "aggregate_prefill": 3774.8, "active_decode": 143.58, "end_to_end_generated": 139.68 },
+    { "slots": 4, "speculation": "mtp", "aggregate_prefill": 3312.6, "active_decode": 166.81, "end_to_end_generated": 160.55 },
+    { "slots": 4, "speculation": "mtp+ngram-mod", "aggregate_prefill": 3313.5, "active_decode": 146.37, "end_to_end_generated": 141.54 },
+    { "slots": 8, "speculation": "none", "aggregate_prefill": 3784.4, "active_decode": 205.25, "end_to_end_generated": 200.44 },
+    { "slots": 8, "speculation": "ngram-mod", "aggregate_prefill": 3800.5, "active_decode": 181.29, "end_to_end_generated": 177.68 },
+    { "slots": 8, "speculation": "mtp", "aggregate_prefill": 3240.4, "active_decode": 203.35, "end_to_end_generated": 197.83 },
+    { "slots": 8, "speculation": "mtp+ngram-mod", "aggregate_prefill": 3120.5, "active_decode": 178.41, "end_to_end_generated": 174.18 }
+  ],
+  "eight_slot_batch_tradeoff": [
+    { "batch": 2048, "microbatch": 512, "aggregate_prefill": 3845.3777565906994, "active_decode": 204.11963490816805, "end_to_end_generated": 199.6434694588 },
+    { "batch": 8192, "microbatch": 1024, "aggregate_prefill": 4528.830718279065, "active_decode": 197.7088702209247, "end_to_end_generated": 190.95533018173214 }
+  ],
+  "single_stream_8k_8k": [
+    { "speculation": "none", "prefill": 4890.79298667928, "decode": 73.4267531612068 },
+    { "speculation": "mtp", "prefill": 3815.37355217705, "decode": 106.583918409698, "drafted": 7814, "accepted": 5586 },
+    { "speculation": "mtp+ngram-mod", "prefill": 3828.43, "decode": 143.57, "drafted": 28285, "accepted": 19258, "aggregation": "three-run suite mean" }
+  ],
+  "unified_kv_restore_four_slot": {
+    "before_patch": {
+      "cached_prompt_tokens": 32752,
+      "evaluated_prompt_tokens": 16,
+      "ttft_p50": 56892.31910000308,
+      "ttft_p95": 56893.32423500455
+    },
+    "after_patch_final_rerun": {
+      "cached_prompt_tokens": 32752,
+      "evaluated_prompt_tokens": 16,
+      "ttft_p50": 2812.581099995441,
+      "ttft_p95": 2813.6307700006,
+      "restored_stage_pass": true
+    }
+  }
+}
