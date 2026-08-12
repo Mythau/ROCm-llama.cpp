@@ -1,3 +1,11 @@
+# Experimental ROCm patch fork
+
+This branch is an experimental, minimally maintained collection of ROCm changes
+for RDNA 3 (`gfx1100`) and RDNA 4 (`gfx1201`), plus a unified-KV prompt-cache
+restore fix. It is published for home-server users and for selective
+cherry-picking. It is not an official llama.cpp build or a supported downstream
+distribution. See [ROCM_FORK.md](ROCM_FORK.md) before using it.
+
 # llama.cpp
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
