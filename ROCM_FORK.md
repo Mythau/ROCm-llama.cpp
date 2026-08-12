@@ -96,7 +96,7 @@ For the tested R9700 + RX 7900 XTX machine, these are important operational
 requirements rather than incidental build choices:
 
 - peer copy must be disabled at compile time with
-  `GGML_CUDA_NO_PEER_COPY=ON`;
+  `GGML_CUDA_NO_PEER_COPY=ON` or it produces token soup;
 - HIP graphs (`GGML_HIP_GRAPHS=ON`) produced a performance regression, so the
   tested server build uses `GGML_HIP_GRAPHS=OFF`;
 - hipBLASLt selected through `ROCBLAS_USE_HIPBLASLT=1` produced a performance
