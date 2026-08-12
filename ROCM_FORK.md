@@ -9,7 +9,9 @@ commits. It is expected to be minimally maintained. There are no release builds,
 support guarantees, compatibility promises, or claim that every patch is
 appropriate for upstream llama.cpp.
 
-That's a nice way of saying this is LLM slop and I'm proud of it.
+That's a nice way of saying this is LLM slop and I'm proud of it. It's a 
+collection of various patches & ROCm performance improvements found spread
+out all over github.
 
 ## Tested hardware and software
 
