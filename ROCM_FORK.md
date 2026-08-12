@@ -45,6 +45,11 @@ they can be reviewed or cherry-picked independently. The main groups are:
 - a unified-KV prompt-cache restore fix that prefers contiguous destination
   cells before falling back to scattered placement.
 
+Every custom code commit is listed in [`PATCHES.md`](PATCHES.md) with explicit
+provenance and applicability labels. The labels distinguish official llama.cpp
+PR imports, AMD-Ecosystem fork imports, external research branches, local ports
+and local fixes; they are not merely descriptive patch names.
+
 The history is the authoritative patch inventory. This is an aggregate branch,
 not a claim of original authorship over patches sourced or adapted from other
 contributors. Retained commit messages provide the most useful provenance

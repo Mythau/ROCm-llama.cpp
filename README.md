@@ -6,6 +6,10 @@ restore fix. It is published for home-server users and for selective
 cherry-picking. It is not an official llama.cpp build or a supported downstream
 distribution. See [ROCM_FORK.md](ROCM_FORK.md) before using it.
 
+The custom commit stack is explicitly catalogued in
+[PATCHES.md](PATCHES.md), including provenance, hardware/workload labels and
+dependencies.
+
 # llama.cpp
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
