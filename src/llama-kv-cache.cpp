@@ -2259,11 +2259,22 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
             ubatch.seq_id[i]   = &dest_seq_id;
         }
 
-        sinfo = find_slot(ubatch, false);
+        // Prompt-cache restores are bulk tensor uploads. Prefer a contiguous
+        // destination so state_read_data() can use one transfer per K/V layer
+        // instead of one synchronized backend transfer per KV cell.
+        sinfo = find_slot(ubatch, true);
+        if (sinfo.empty()) {
+            LLAMA_LOG_INFO("%s: no contiguous range for %u restored cells; falling back to scattered placement\n",
+                    __func__, cell_count);
+            sinfo = find_slot(ubatch, false);
+        }
         if (sinfo.empty()) {
             LLAMA_LOG_ERROR("%s: failed to find %d available cells in kv cache\n", __func__,  cell_count);
             return false;
         }
+
+        LLAMA_LOG_INFO("%s: restored cell placement: count = %u, contiguous = %d\n",
+                __func__, cell_count, sinfo.is_contiguous());
 
         // TODO: we cannot yet restore llama_kv_cell_ext as the apply_ubatch() does not support it yet
         //       see: https://github.com/ggml-org/llama.cpp/pull/16825#issuecomment-3460868350
