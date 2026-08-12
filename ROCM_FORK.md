@@ -88,15 +88,27 @@ $env:ROCBLAS_USE_HIPBLASLT = "0"
 $env:LUCE_Q8_MEMO = "1"
 ```
 
-Those runtime choices were selected for the tested workload, not asserted as
-universally optimal. Benchmark both settings for your own model and hardware.
+For the tested R9700 + RX 7900 XTX machine, these are important operational
+requirements rather than incidental build choices:
+
+- peer copy must be disabled at compile time with
+  `GGML_CUDA_NO_PEER_COPY=ON`;
+- HIP graphs (`GGML_HIP_GRAPHS=ON`) produced a performance regression, so the
+  tested server build uses `GGML_HIP_GRAPHS=OFF`;
+- hipBLASLt selected through `ROCBLAS_USE_HIPBLASLT=1` produced a performance
+  regression, so the tested runtime uses `ROCBLAS_USE_HIPBLASLT=0`.
+
+These results describe this particular mixed-GPU machine and its tested Qwen
+Q8/BF16-KV workloads. They are not asserted as universal defaults for every AMD
+GPU, ROCm release, model, or quantization. Benchmark both settings for your own
+hardware and workload.
 
 ## Important limitations
 
 - The branch is intentionally experimental and may diverge from upstream.
 - It was assembled as a custom performance build, not as a polished product.
-- HIP graphs were disabled in the principal concurrency-tested build.
-- Peer copy was disabled in that build.
+- HIP graphs and hipBLASLt were measured regressions on the tested machine.
+- Peer copy had to be compiled out for the tested R9700 + RX 7900 XTX pairing.
 - The unified-KV fix has strong measured evidence on the tested configuration,
   but it is not a general KV-cache compaction algorithm.
 - Speculative MTP carries its own auxiliary context and state. Prompt-cache
