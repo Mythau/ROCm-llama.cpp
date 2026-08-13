@@ -6,7 +6,12 @@ Implementation plan: [DYNAMIC_SPECULATION_IMPLEMENTATION_PLAN.md](DYNAMIC_SPECUL
 
 ## Objective
 
-Select speculative implementations per request according to server occupancy. Request phase matters only when finding a safe boundary at which a sticky demotion can commit. The policy is configured when `llama-server` starts. Clients do not select their own speculative mode.
+Take advantage of speculative decoding during single-stream demand, then
+degrade gracefully toward ordinary non-speculative decoding as concurrent
+demand rises. Select speculative implementations per request according to
+server occupancy. Request phase matters only when finding a safe boundary at
+which a sticky demotion can commit. The policy is configured when
+`llama-server` starts. Clients do not select their own speculative mode.
 
 The intended policy is:
 
@@ -19,6 +24,25 @@ The intended policy is:
 - The next newly admitted solo request may use MTP after a full prefill or a synchronized cache restore.
 
 The three-request policy must remain configurable. It must not be hard-coded while benchmark evidence is incomplete.
+
+## Deployment boundary and future scheduler
+
+Dynamic speculation is not itself a multi-agent scheduler. It begins after the
+server has admitted requests and does not provide caller identity, queuing,
+stable caller-to-slot affinity or routing among independently managed
+llama-server processes.
+
+Where execution slots are deployed as separate server processes, each process
+has its own port and the calling software currently needs a management layer to
+choose among them. The alternative is to place scheduling inside llama.cpp
+behind one endpoint and include a caller identifier with each request. Such a
+scheduler could assign slots, maintain useful KV-cache affinity, queue excess
+demand and feed authoritative occupancy into this speculation policy.
+
+The llama.cpp-side scheduler is currently the preferred direction because it
+can directly observe slot, KV-cache and speculative state. This is not yet a
+final architecture decision; external routing may remain preferable depending
+on how caller lifecycle and failure handling need to work.
 
 ## 1. Startup policy
 

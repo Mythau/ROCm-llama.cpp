@@ -133,6 +133,15 @@ draft and serialized boundary state match. See
 [`DYNAMIC_SPECULATION_PATCH_NOTES.md`](DYNAMIC_SPECULATION_PATCH_NOTES.md) for
 the exact implementation, validation and limitations.
 
+The objective is to capture the large speculative-decoding benefit available
+under single-stream demand, then progressively remove speculative work as
+concurrent demand rises until the server reaches a normal non-speculative state.
+This does not yet provide a general request scheduler. Separate llama-server
+processes still require port management in the calling software. A single-port
+llama.cpp-side scheduler using caller identifiers is the current preferred
+direction, but the choice between internal scheduling and an external routing
+layer remains open.
+
 ## Important limitations
 
 - The branch is intentionally experimental and may diverge from upstream.

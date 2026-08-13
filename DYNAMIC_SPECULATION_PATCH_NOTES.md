@@ -5,6 +5,20 @@ decoding. It is intended for a fixed multi-slot home server that should retain
 the single-request benefit of MTP and ngram-mod without paying their full
 prompt-processing cost as concurrency rises.
 
+## Objective
+
+The objective is to exploit speculative decoding when demand consists of a
+single stream, where MTP and n-gram drafting can provide their largest benefit,
+then degrade gracefully as concurrent demand rises. Each speculative
+implementation has an occupied-stream limit. Crossing a limit disables that
+implementation for affected requests; sufficiently high concurrency therefore
+reaches ordinary non-speculative decoding instead of continuing to pay draft
+and prompt-mirroring costs that no longer improve service throughput.
+
+This is speculation policy, not a complete request scheduler. It assumes that
+requests have already reached a multi-slot llama.cpp server and controls which
+speculative implementations those admitted requests may use.
+
 ## Runtime policy
 
 The tested four-slot policy is:
@@ -128,6 +142,29 @@ because acceptance varies with generated content.
   static-only.
 - The separate intermittent unified-KV scattered-copy slow path is not fixed by
   this feature.
+- The patch does not provide caller identity, request queuing, slot affinity or
+  routing across multiple llama-server processes. Deployments that represent
+  independently managed execution slots as separate server processes still
+  expose separate ports and require the calling software to select and manage
+  them.
+
+## Scheduling and integration direction
+
+There are two plausible ways to integrate multiple execution slots with agent
+or home-server software:
+
+1. Add a llama.cpp-side scheduler behind one endpoint. A caller identifier
+   would let the server assign requests to slots, preserve caller/cache affinity
+   where useful, queue excess work and apply the dynamic speculation policy to
+   the resulting occupancy.
+2. Keep scheduling outside llama.cpp. A management layer in the calling
+   software would track the available llama-server processes and their ports,
+   route each caller and expose its own unified interface.
+
+The current preference is a llama.cpp-side scheduler because it has direct
+knowledge of slot state, KV-cache residency and speculative eligibility. That
+direction is not final; the external-management design may still prove cleaner
+once the caller and lifecycle requirements are better defined.
 
 See `DYNAMIC_SPECULATION.md` for the design, the implementation plan for task
 boundaries, `KNOWN_ISSUES.md` for deferred faults and
