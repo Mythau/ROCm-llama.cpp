@@ -250,14 +250,30 @@ Primary external repository:
 
 The following researched items are not patches in the current public branch:
 
-- per-request admission-driven MTP/ngram policy;
-- MTP `pending_h` checkpoint serialization;
 - an administrative cache kill switch;
 - a general multi-agent/job scheduler;
 - coalesced or asynchronous scattered KV restoration;
 - ROCWMMA BF16-cache replacement work;
 - TurboQuant;
 - profiling/instrumentation from the original Lucebox aggregate commit.
+
+## Series I — dynamic speculative admission
+
+### P27 — occupancy-driven per-request MTP/ngram policy
+
+- **Commit:** this feature commit
+- **Labels:** `LOCAL-FEATURE`, `SERVER`, `SPECULATIVE`, `MTP`, `NGRAM`, `PROMPT-CACHE`
+- **Author:** Codex Build, based on local design, source tracing and benchmark validation
+- **Standalone:** no; this is a coordinated common/server/cache change
+- **Effect:** assigns MTP/ngram eligibility at request admission from occupied
+  stream count, applies sticky demotion, filters MTP/ngram execution, switches
+  target NextN per exact batch view and preserves truthful target-only versus
+  synchronized-MTP cache state
+- **CLI:** `--spec-active-limit TYPE=N,...`
+- **Validated policy:** `draft-mtp=1,ngram-mod=2` on a four-slot Q35 server
+- **Supported dynamically:** MTP and all n-gram implementations
+- **Static-only:** draft-simple, Eagle3, DFlash and DSpark
+- **Details:** [`DYNAMIC_SPECULATION_PATCH_NOTES.md`](DYNAMIC_SPECULATION_PATCH_NOTES.md)
 
 ## Minimal cherry-pick guidance
 
@@ -269,6 +285,7 @@ The following researched items are not patches in the current public branch:
 - Q8 activation reuse: P16-P17, with `LUCE_Q8_MEMO=1`.
 - Qwen hybrid conv layout: P19-P20.
 - Multi-stream/shared-expert series: P22-P24 in order.
+- Dynamic speculative admission: P27 as one coordinated feature commit.
 
 Expect conflicts when applying these commits to newer llama.cpp revisions. The
 aggregate branch is the tested combination; individual cherry-picks still need

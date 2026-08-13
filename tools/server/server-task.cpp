@@ -1748,6 +1748,129 @@ server_prompt_cache_state * server_prompt_cache::alloc(
     return &states.back();
 }
 
+std::unique_ptr<server_prompt_cache_state> server_prompt_cache::take(
+        const server_prompt & prompt,
+        const server_tokens & tokens_new) {
+    const int lcp_best = prompt.tokens.get_common_prefix(tokens_new);
+
+    float f_keep_best = prompt.tokens.size() > 0 ? float(lcp_best) / prompt.tokens.size() : -1.0f;
+    float f_sim_best  = float(lcp_best) / tokens_new.size();
+
+    SRV_TRC(" - looking for better prompt, base f_keep = %.3f, f_sim = %.3f\n", f_keep_best, f_sim_best);
+
+    auto it_best = states.end();
+
+    for (auto it = states.begin(); it != states.end(); ++it) {
+        const int lcp_cur = it->prompt.tokens.get_common_prefix(tokens_new);
+
+        const float f_keep_cur = float(lcp_cur) / it->prompt.tokens.size();
+        const float f_sim_cur  = float(lcp_cur) / tokens_new.size();
+
+        SRV_TRC("   - prompt with length %7zu, lcp = %7d, f_keep = %.3f, f_sim = %.3f\n", it->prompt.tokens.size(), lcp_cur, f_keep_cur, f_sim_cur);
+
+        if (f_keep_cur < 0.25f) {
+            continue;
+        }
+
+        if (f_keep_best < f_keep_cur && f_sim_best < f_sim_cur) {
+            f_keep_best = f_keep_cur;
+            f_sim_best  = f_sim_cur;
+            it_best = it;
+        }
+    }
+
+    if (it_best == states.end()) {
+        return nullptr;
+    }
+
+    SRV_TRC(" - found better prompt with f_keep = %.3f, f_sim = %.3f\n", f_keep_best, f_sim_best);
+
+    auto result = std::make_unique<server_prompt_cache_state>(std::move(*it_best));
+    states.erase(it_best);
+    return result;
+}
+
+server_prompt_cache_restore_result server_prompt_cache::apply(
+        std::unique_ptr<server_prompt_cache_state> state,
+        server_prompt_cache_restore_mode mode,
+        server_prompt & prompt,
+        llama_context * ctx_tgt,
+        llama_context * ctx_dft,
+        common_speculative * spec,
+        int32_t id_slot) {
+    server_prompt_cache_restore_result result;
+    if (!state) {
+        return result;
+    }
+
+    result.found = true;
+
+    const size_t size_tgt = state->data.main.size();
+    const size_t n_tgt = llama_state_seq_set_data_ext(ctx_tgt, state->data.main.data(), size_tgt, id_slot, 0);
+    if (n_tgt != size_tgt) {
+        SRV_ERR("failed to restore state with size %zu\n", size_tgt);
+        result.reason = SERVER_PROMPT_CACHE_RESTORE_REASON_TARGET_FAILED;
+        return result;
+    }
+
+    result.target = true;
+    prompt = std::move(state->prompt);
+
+    auto clear_optional = [&]() {
+        if (ctx_dft != nullptr) {
+            llama_memory_seq_rm(llama_get_memory(ctx_dft), id_slot, -1, -1);
+        }
+        common_speculative_clear_state(spec, id_slot);
+        result.draft = false;
+        result.spec  = false;
+    };
+
+    if (mode == SERVER_PROMPT_CACHE_RESTORE_TARGET_ONLY) {
+        clear_optional();
+        return result;
+    }
+
+    if (ctx_dft == nullptr || state->data.drft.empty()) {
+        clear_optional();
+        result.reason = SERVER_PROMPT_CACHE_RESTORE_REASON_OPTIONAL_MISSING;
+        return result;
+    }
+
+    const size_t size_dft = state->data.drft.size();
+    const size_t n_dft = llama_state_seq_set_data_ext(ctx_dft, state->data.drft.data(), size_dft, id_slot, 0);
+    if (n_dft != size_dft) {
+        SRV_WRN("failed to restore state with size %zu\n", size_dft);
+        clear_optional();
+        result.reason = SERVER_PROMPT_CACHE_RESTORE_REASON_DRAFT_FAILED;
+        return result;
+    }
+
+    result.draft = true;
+
+    if (common_speculative_requires_state(spec)) {
+        if (state->data.spec.empty()) {
+            clear_optional();
+            result.reason = SERVER_PROMPT_CACHE_RESTORE_REASON_OPTIONAL_MISSING;
+            return result;
+        }
+
+        if (common_speculative_restore_state(spec, id_slot, state->data.spec) != COMMON_SPECULATIVE_STATE_SYNCHRONIZED) {
+            SRV_WRN("failed to restore speculative state with size %zu\n", state->data.spec.size());
+            clear_optional();
+            result.reason = SERVER_PROMPT_CACHE_RESTORE_REASON_SPEC_FAILED;
+            return result;
+        }
+
+        result.spec = true;
+        SRV_TRC(" - restored speculative state with size %.3f KiB\n", state->data.spec.size() / 1024.0);
+    } else if (!state->data.spec.empty()) {
+        clear_optional();
+        result.reason = SERVER_PROMPT_CACHE_RESTORE_REASON_SPEC_FAILED;
+    }
+
+    return result;
+}
+
 bool server_prompt_cache::load(
         server_prompt & prompt,
         const server_tokens & tokens_new,

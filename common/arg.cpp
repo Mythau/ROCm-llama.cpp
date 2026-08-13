@@ -4088,6 +4088,56 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_TYPE"));
     add_opt(common_arg(
+        {"--spec-active-limit"}, "TYPE=N,...",
+        "maximum active server streams for loaded MTP and n-gram implementations; reported by /props when configured\n"
+        "example: draft-mtp=1,ngram-mod=2 (default: unused)",
+        [](common_params & params, const std::string & value) {
+            std::vector<common_params_speculative_active_limit> limits;
+            std::set<common_speculative_type> seen_types;
+
+            for (const auto & raw_entry : string_split<std::string>(value, ',')) {
+                const std::string entry = string_strip(raw_entry);
+                const size_t equals = entry.find('=');
+                if (equals == std::string::npos || equals == 0 || equals + 1 == entry.size() ||
+                        entry.find('=', equals + 1) != std::string::npos) {
+                    throw std::invalid_argument("expected TYPE=N entries separated by commas");
+                }
+
+                const std::string type_name = string_strip(entry.substr(0, equals));
+                const std::string limit_str = string_strip(entry.substr(equals + 1));
+                const auto type = common_speculative_type_from_name(type_name);
+
+                if (type == COMMON_SPECULATIVE_TYPE_COUNT) {
+                    throw std::invalid_argument(string_format("unknown speculative type '%s'", type_name.c_str()));
+                }
+                if (type == COMMON_SPECULATIVE_TYPE_NONE) {
+                    throw std::invalid_argument("speculative type 'none' cannot have an active limit");
+                }
+                if (!seen_types.insert(type).second) {
+                    throw std::invalid_argument(string_format("duplicate speculative type '%s'", type_name.c_str()));
+                }
+
+                size_t parsed = 0;
+                int limit;
+                try {
+                    limit = std::stoi(limit_str, &parsed);
+                } catch (const std::exception &) {
+                    throw std::invalid_argument(string_format("invalid active limit '%s'", limit_str.c_str()));
+                }
+                if (parsed != limit_str.size() || limit <= 0) {
+                    throw std::invalid_argument(string_format("active limit for '%s' must be a positive integer", type_name.c_str()));
+                }
+
+                limits.push_back({ type, limit });
+            }
+
+            if (limits.empty()) {
+                throw std::invalid_argument("expected at least one TYPE=N entry");
+            }
+            params.spec_active_limits = std::move(limits);
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--spec-ngram-mod-n-min"}, "N",
         string_format("minimum number of ngram tokens to use for ngram-based speculative decoding (default: %d)", params.speculative.ngram_mod.n_min),
         [](common_params & params, int value) {

@@ -34,6 +34,12 @@ The principal four-slot workload used:
 - batch 8,192 and microbatch 1,024;
 - one complete warm-up wave followed by three measured waves.
 
+Dynamic scheduler comparisons kept `--parallel 4`, context 50,176, batch 8,192
+and microbatch 1,024 fixed for every one/two/four-request run. Only the number of
+simultaneously submitted requests changed. Each dynamic mode was compared with
+the same fixed speculative mode; the four-request fully gated state was compared
+with a separately launched no-spec server.
+
 The broader synchronized concurrency sweep used 8,192-token prompts and 4,096
 generated tokens at 2, 4 and 8 slots with batch 2,048 / microbatch 512.
 
@@ -43,10 +49,10 @@ response. TTFT is the client-observed request-to-first-token interval.
 
 ## Output checks
 
-The concurrency harness checked request completion, expected sentinel presence,
-output length, null bytes and Unicode replacement characters. Some strict
-sentinel failures were model-generated identifier mutations rather than transport
-corruption; they remain counted as failures in the clean-wave totals.
+The concurrency harness treated exact cross-request sentinels, wrong generated
+token counts, null bytes and Unicode replacement characters as hard failures.
+Missing or mutated self-sentinels and malformed reasoning tags were recorded as
+model-behavior warnings rather than backend corruption.
 
 Raw model text is deliberately excluded from this package.
 
@@ -60,4 +66,3 @@ Raw model text is deliberately excluded from this package.
 
 The YOLO single-request headline therefore needs additional independent repeats.
 The four-slot aggregate result has the stronger repetition count.
-

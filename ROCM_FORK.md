@@ -43,7 +43,8 @@ they can be reviewed or cherry-picked independently. The main groups are:
 - fused and layout-tuned Qwen hybrid-model operations;
 - multi-stream correctness and overlap changes;
 - a unified-KV prompt-cache restore fix that prefers contiguous destination
-  cells before falling back to scattered placement.
+  cells before falling back to scattered placement;
+- occupancy-driven per-request MTP/ngram admission for multi-slot servers.
 
 Every custom code commit is listed in [`PATCHES.md`](PATCHES.md) with explicit
 provenance and applicability labels. The labels distinguish official llama.cpp
@@ -115,6 +116,23 @@ Q8/BF16-KV workloads. They are not asserted as universal defaults for every AMD
 GPU, ROCm release, model, or quantization. Benchmark both settings for your own
 hardware and workload.
 
+## Dynamic speculative decoding
+
+The branch supports a server-wide occupied-stream policy for MTP and n-gram
+implementations. The tested four-slot invocation adds:
+
+```text
+--spec-type draft-mtp,ngram-mod
+--spec-active-limit draft-mtp=1,ngram-mod=2
+```
+
+This admits MTP plus ngram at one active request, ngram only at two, and neither
+at three or four. Demotion is sticky for the current request; later requests are
+evaluated afresh. Cache restoration retains synchronized MTP only when target,
+draft and serialized boundary state match. See
+[`DYNAMIC_SPECULATION_PATCH_NOTES.md`](DYNAMIC_SPECULATION_PATCH_NOTES.md) for
+the exact implementation, validation and limitations.
+
 ## Important limitations
 
 - The branch is intentionally experimental and may diverge from upstream.
@@ -123,10 +141,11 @@ hardware and workload.
 - Peer copy had to be compiled out for the tested R9700 + RX 7900 XTX pairing.
 - The unified-KV fix has strong measured evidence on the tested configuration,
   but it is not a general KV-cache compaction algorithm.
-- Speculative MTP carries its own auxiliary context and state. Prompt-cache
-  restoration of all MTP boundary state is not fixed by the unified-KV commit.
-- Per-request speculative decoding policy and a broader multi-agent scheduler
-  are design work, not features currently present in this branch.
+- Speculative MTP carries its own auxiliary context and state. The dynamic patch
+  serializes the required boundary state for aligned restores, but not every
+  arbitrary rewind or model-draft implementation is supported.
+- Occupancy-driven per-request speculative admission is implemented; a broader
+  multi-agent/job scheduler is not.
 - No binaries, model files, benchmark dumps, or ROCm runtime redistributables are
   included by this documentation commit.
 

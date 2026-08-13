@@ -1,6 +1,6 @@
 {
-  "schema": "rocm-yolo-sanitized-aggregates-v1",
-  "date": "2026-08-12",
+  "schema": "rocm-yolo-sanitized-aggregates-v2",
+  "date": "2026-08-13",
   "units": {
     "throughput": "tokens_per_second",
     "latency": "milliseconds"
@@ -84,6 +84,62 @@
     { "speculation": "mtp", "prefill": 3815.37355217705, "decode": 106.583918409698, "drafted": 7814, "accepted": 5586 },
     { "speculation": "mtp+ngram-mod", "prefill": 3828.43, "decode": 143.57, "drafted": 28285, "accepted": 19258, "aggregation": "three-run suite mean" }
   ],
+  "dynamic_speculation_mechanism_8k_4k": [
+    {
+      "active_requests": 1,
+      "dynamic_mode": "mtp+ngram-mod",
+      "dynamic_prefill_values": [4385.84492108504, 4367.148614994961, 4838.301392393685],
+      "dynamic_prefill_median": 4385.84492108504,
+      "fixed_mode": "mtp+ngram-mod",
+      "fixed_prefill_values": [4374.484027686553, 4392.144752051848, 4847.358790053802],
+      "fixed_prefill_median": 4392.144752051848,
+      "prefill_difference_percent": -0.14343404697362283,
+      "all_hard_checks_passed": true
+    },
+    {
+      "active_requests": 2,
+      "dynamic_mode": "ngram-mod",
+      "dynamic_prefill_values": [4710.722560838951, 4725.5748723555425, 4700.642060538383],
+      "dynamic_prefill_median": 4710.722560838951,
+      "fixed_mode": "ngram-mod",
+      "fixed_prefill_values": [4865.643180920169, 4838.672761275851, 4714.998974637369],
+      "fixed_prefill_median": 4838.672761275851,
+      "prefill_difference_percent": -2.6443243168021713,
+      "all_hard_checks_passed": true
+    },
+    {
+      "active_requests": 4,
+      "dynamic_mode": "none",
+      "dynamic_prefill_values": [4777.814633010893, 4746.745731195417, 4779.659630997382],
+      "dynamic_prefill_median": 4777.814633010893,
+      "dynamic_decode_median": 164.41291092763768,
+      "dynamic_end_to_end_median": 156.48178667664365,
+      "fixed_mode": "none",
+      "fixed_prefill_values": [4727.682092119365, 4709.894949133552, 4727.81981165998],
+      "fixed_prefill_median": 4727.682092119365,
+      "fixed_decode_median": 167.9055327645168,
+      "fixed_end_to_end_median": 159.48819024897654,
+      "prefill_difference_percent": 1.060404230121459,
+      "decode_difference_percent": -2.08011122645817,
+      "end_to_end_difference_percent": -1.8850320939999388,
+      "all_hard_checks_passed": true
+    }
+  ],
+  "dynamic_speculation_cache_restore": {
+    "synchronized_solo_mtp": {
+      "cached_tokens": 8447,
+      "evaluated_tokens": 1,
+      "mtp_ready_after_restore": true,
+      "pass": true
+    },
+    "target_only_from_occupancy_two": {
+      "cached_tokens": 8188,
+      "evaluated_tokens": 4,
+      "mtp_ready_after_restore": false,
+      "target_hit_retained": true,
+      "pass": true
+    }
+  },
   "unified_kv_restore_four_slot": {
     "before_patch": {
       "cached_prompt_tokens": 32752,

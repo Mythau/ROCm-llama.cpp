@@ -5,6 +5,7 @@
 #include "server-task.h"
 #include "server-queue.h"
 #include "server-schema.h"
+#include "server-speculative-policy.h"
 #include "server-stream.h"
 
 #include "build-info.h"
@@ -16,6 +17,8 @@
 #include "speculative.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
+
+#include "../../src/llama-ext.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -62,6 +65,58 @@ enum slot_state {
     SLOT_STATE_DONE_PROMPT,
     SLOT_STATE_GENERATING,
 };
+
+static const char * slot_state_to_str(slot_state state) {
+    static const char * const names[] = {
+        "idle",
+        "wait_other",
+        "started",
+        "processing_prompt",
+        "done_prompt",
+        "generating",
+    };
+    return names[state];
+}
+
+static json speculative_types_from_mask(uint32_t mask) {
+    json types = json::array();
+    for (int type = COMMON_SPECULATIVE_TYPE_NONE + 1; type < COMMON_SPECULATIVE_TYPE_COUNT; ++type) {
+        if ((mask & (1u << type)) != 0) {
+            types.push_back(common_speculative_type_to_str((common_speculative_type) type));
+        }
+    }
+    return types;
+}
+
+static json speculative_active_limits_to_json(
+        const std::vector<common_params_speculative_active_limit> & limits) {
+    json result = json::object();
+    for (const auto & limit : limits) {
+        result[common_speculative_type_to_str(limit.type)] = limit.max_active_streams;
+    }
+    return result;
+}
+
+static std::string speculative_active_limits_to_str(
+        const std::vector<common_params_speculative_active_limit> & limits) {
+    std::string result;
+    for (const auto & limit : limits) {
+        if (!result.empty()) {
+            result += ",";
+        }
+        result += string_format("%s=%d",
+                common_speculative_type_to_str(limit.type).c_str(), limit.max_active_streams);
+    }
+    return result;
+}
+
+static constexpr uint32_t SPECULATIVE_ACTIVE_LIMIT_SUPPORTED =
+        (1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP) |
+        (1u << COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE) |
+        (1u << COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K) |
+        (1u << COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V) |
+        (1u << COMMON_SPECULATIVE_TYPE_NGRAM_MOD) |
+        (1u << COMMON_SPECULATIVE_TYPE_NGRAM_CACHE);
 
 struct server_slot; // forward declaration
 
@@ -212,6 +267,7 @@ struct server_slot {
     std::vector<int32_t> spec_i_batch;
     common_prompt_checkpoint spec_ckpt;
     bool spec_is_replay = false;
+    uint32_t spec_demote_pending = 0;
 
     // TODO: move members that belong to the task (such as `generated_text`, `has_new_line`) to task_results_state
     //       see https://github.com/ggml-org/llama.cpp/pull/18283#issuecomment-3710175837
@@ -257,16 +313,15 @@ struct server_slot {
             return false;
         }
 
-        std::vector<uint8_t> state_spec;
-        const bool state_spec_saved = common_speculative_get_state(spec, id, state_spec);
-        if (common_speculative_requires_state(spec) && !state_spec_saved) {
-            SLT_WRN(*this, "%s", "refusing to save prompt cache entry without synchronized speculative state\n");
-            return false;
-        }
+        auto state_spec = common_speculative_capture_state(spec, id);
+        const bool synchronized = state_spec.status == COMMON_SPECULATIVE_STATE_SYNCHRONIZED;
+        const bool stateful     = common_speculative_requires_state(spec);
+        const bool capture_dft  = ctx_dft != nullptr && (!stateful || synchronized);
+        GGML_ASSERT(!synchronized || ctx_dft != nullptr);
 
         const size_t cur_size_tgt =           llama_state_seq_get_size_ext(ctx_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
-        const size_t cur_size_dft = ctx_dft ? llama_state_seq_get_size_ext(ctx_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE) : 0;
-        const size_t cur_size_spec = state_spec.size();
+        const size_t cur_size_dft = capture_dft ? llama_state_seq_get_size_ext(ctx_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE) : 0;
+        const size_t cur_size_spec = synchronized ? state_spec.data.size() : 0;
 
         const size_t cur_size = cur_size_tgt + cur_size_dft + cur_size_spec;
 
@@ -280,10 +335,12 @@ struct server_slot {
         }
 
         llama_state_seq_get_data_ext(ctx_tgt, cur->data.main.data(), cur_size_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
-        if (ctx_dft) {
+        if (capture_dft) {
             llama_state_seq_get_data_ext(ctx_dft, cur->data.drft.data(), cur_size_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE);
         }
-        cur->data.spec = std::move(state_spec);
+        if (synchronized) {
+            cur->data.spec = std::move(state_spec.data);
+        }
 
         return true;
     }
@@ -410,11 +467,6 @@ struct server_slot {
         return task->need_embd() || (spec && common_speculative_need_embd(spec));
     }
 
-    bool need_embd_nextn() const {
-        GGML_ASSERT(task);
-        return spec && common_speculative_need_embd_nextn(spec);
-    }
-
     // if the context does not have a memory module then all embeddings have to be computed within a single ubatch
     // also we cannot split if the pooling would require any past tokens
     // (MTP supports splitting — uses task->need_embd() not need_embd())
@@ -458,6 +510,44 @@ struct server_slot {
 
     bool can_speculate() const {
         return !!spec;
+    }
+
+    bool spec_cycle_idle() const {
+        return spec_draft.empty() &&
+            spec_i_batch.empty() &&
+            !spec_is_replay &&
+            !common_speculative_cycle_active(spec, id);
+    }
+
+    void finish_spec_cycle() {
+        if (spec_demote_pending && spec_cycle_idle()) {
+            common_speculative_disable_mask(spec, id, spec_demote_pending);
+            spec_demote_pending = 0;
+        }
+    }
+
+    void request_spec_demote(uint32_t mask) {
+        spec_demote_pending |= mask;
+        finish_spec_cycle();
+    }
+
+    void abort_spec_cycle() {
+        GGML_ASSERT(can_speculate());
+
+        if (!spec_is_replay) {
+            mem.seq_rm(id, -1, -1);
+            prompt.clear();
+        }
+
+        if (common_speculative_cycle_active(spec, id)) {
+            common_speculative_abandon_cycle(spec, id);
+        }
+
+        spec_draft.clear();
+        spec_i_batch.clear();
+        spec_ckpt.clear();
+        spec_is_replay = false;
+        finish_spec_cycle();
     }
 
     void add_token(const completion_token_output & token) {
@@ -538,6 +628,10 @@ struct server_slot {
 
             t_last_used        =  ggml_time_us();
             t_token_generation = (ggml_time_us() - t_start_generation) / 1e3;
+
+            if (can_speculate() && !spec_cycle_idle()) {
+                abort_spec_cycle();
+            }
 
             state = SLOT_STATE_IDLE;
 
@@ -685,7 +779,7 @@ struct server_slot {
         common_speculative_print_stats(spec);
     }
 
-    json to_json(bool only_metrics = false) const {
+    json to_json(bool only_metrics = false, bool speculative_policy_active = false) const {
         json res;
 
         res = {
@@ -694,6 +788,34 @@ struct server_slot {
             {"speculative",   can_speculate()},
             {"is_processing", is_processing()},
         };
+
+        if (speculative_policy_active) {
+            const uint32_t loaded_mask   = common_speculative_loaded_mask(spec);
+            const uint32_t eligible_mask = common_speculative_eligible_mask(spec, id);
+            const uint32_t stateful_mask = common_speculative_stateful_mask(spec);
+            const uint32_t mtp_mask      = 1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+            const uint32_t synchronized_mask = stateful_mask != 0
+                ? common_speculative_stateful_synchronized_mask(spec, id)
+                : 0;
+
+            json policy = {
+                {"phase",                  slot_state_to_str(state)},
+                {"eligible_mask",          eligible_mask},
+                {"eligible_types",         speculative_types_from_mask(eligible_mask)},
+                {"pending_demotion_mask",  spec_demote_pending},
+                {"pending_demotion_types", speculative_types_from_mask(spec_demote_pending)},
+            };
+
+            if (stateful_mask != 0) {
+                policy["stateful_synchronized_mask"]  = synchronized_mask;
+                policy["stateful_synchronized_types"] = speculative_types_from_mask(synchronized_mask);
+            }
+            if ((loaded_mask & mtp_mask) != 0) {
+                policy["mtp_ready"] = (synchronized_mask & mtp_mask) != 0;
+            }
+
+            res["speculative_policy"] = std::move(policy);
+        }
 
         const auto & ptask = task ? task : task_prev;
 
@@ -752,6 +874,10 @@ struct server_slot {
             if (mbatch) {
                 float * embd = mtmd_batch_get_output_embd(mbatch.get(), chunk.get());
                 if (embd) {
+                    if (spec) {
+                        llama_set_embeddings_nextn(ctx_tgt, false, /*masked*/ false);
+                    }
+
                     void * cb_data = spec;
                     static auto cb = [](llama_batch batch, void * user_data) {
                         common_speculative * spec = static_cast<common_speculative *>(user_data);
@@ -967,6 +1093,8 @@ private:
     common_context_seq_rm_type ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_NO;
 
     common_speculative_ptr spec;
+
+    std::vector<server_speculative_policy_limit> speculative_policy_limits;
 
     bool add_bos_token = true;
 
@@ -1365,6 +1493,56 @@ private:
             model_dft = nullptr;
         }
 
+        speculative_policy_limits.clear();
+        const uint32_t loaded_speculative = common_speculative_loaded_mask(spec.get());
+
+        if (!params_base.spec_active_limits.empty()) {
+            const uint32_t unsupported = loaded_speculative & ~SPECULATIVE_ACTIVE_LIMIT_SUPPORTED;
+            if (unsupported != 0) {
+                SRV_ERR("speculative active limits do not support loaded implementation(s): %s\n",
+                        speculative_types_from_mask(unsupported).dump().c_str());
+                return false;
+            }
+        }
+
+        uint32_t configured_speculative = 0;
+        for (const auto & limit : params_base.spec_active_limits) {
+            const uint32_t type_mask = 1u << limit.type;
+            if ((type_mask & SPECULATIVE_ACTIVE_LIMIT_SUPPORTED) == 0) {
+                SRV_ERR("speculative active limits do not support implementation '%s'\n",
+                        common_speculative_type_to_str(limit.type).c_str());
+                return false;
+            }
+            if ((loaded_speculative & type_mask) == 0) {
+                SRV_ERR("speculative active limit references unloaded implementation '%s'\n",
+                        common_speculative_type_to_str(limit.type).c_str());
+                return false;
+            }
+            configured_speculative |= type_mask;
+            speculative_policy_limits.push_back({ type_mask, (size_t) limit.max_active_streams });
+        }
+
+        if (!params_base.spec_active_limits.empty() && configured_speculative != loaded_speculative) {
+            std::string missing_types;
+            const uint32_t missing_mask = loaded_speculative & ~configured_speculative;
+            for (int type = COMMON_SPECULATIVE_TYPE_NONE + 1; type < COMMON_SPECULATIVE_TYPE_COUNT; ++type) {
+                if ((missing_mask & (1u << type)) != 0) {
+                    if (!missing_types.empty()) {
+                        missing_types += ",";
+                    }
+                    missing_types += common_speculative_type_to_str((common_speculative_type) type);
+                }
+            }
+            SRV_ERR("speculative active limit mapping is missing loaded implementation(s): %s\n",
+                    missing_types.c_str());
+            return false;
+        }
+
+        if (!params_base.spec_active_limits.empty()) {
+            SRV_INF("speculative active limits: %s\n",
+                    speculative_active_limits_to_str(params_base.spec_active_limits).c_str());
+        }
+
         for (int i = 0; i < params_base.n_parallel; i++) {
             server_slot & slot = slots[i];
 
@@ -1381,6 +1559,16 @@ private:
             SLT_TRC(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
 
             slot.callback_on_release = [this](int id_slot) {
+                const auto & released = slots[id_slot];
+                if (released.task_prev && released.task_prev->is_parent()) {
+                    const int id_parent = released.task_prev->id;
+                    for (auto & other : slots) {
+                        if (other.state == SLOT_STATE_WAIT_OTHER && other.task->id_parent == id_parent) {
+                            other.release();
+                        }
+                    }
+                }
+
                 queue_tasks.pop_deferred_task(id_slot);
             };
 
@@ -1598,7 +1786,31 @@ private:
         return nullptr;
     }
 
-    server_slot * get_available_slot(const server_task & task) {
+    enum slot_selection_status {
+        SLOT_SELECTION_READY,
+        SLOT_SELECTION_NO_SLOT,
+        SLOT_SELECTION_SLOT_UNAVAILABLE,
+        SLOT_SELECTION_GROUP_UNAVAILABLE,
+    };
+
+    enum slot_cache_intent {
+        SLOT_CACHE_INTENT_NONE,
+        SLOT_CACHE_INTENT_SAVE_AND_LOAD,
+    };
+
+    struct slot_selection {
+        slot_selection_status status = SLOT_SELECTION_NO_SLOT;
+
+        server_slot * parent = nullptr;
+
+        std::vector<server_slot *> children;
+
+        size_t n_children_available = 0;
+
+        slot_cache_intent cache_intent = SLOT_CACHE_INTENT_NONE;
+    };
+
+    slot_selection select_slots(const server_task & task) {
         server_slot * ret = nullptr;
 
         bool update_cache = false;
@@ -1687,30 +1899,50 @@ private:
             }
         }
 
-        if (ret) {
-            update_cache = update_cache && prompt_cache;
+        slot_selection result;
+        if (ret == nullptr) {
+            return result;
+        }
 
-            // cache prompts only for completion tasks
-            update_cache = update_cache && task.type == SERVER_TASK_TYPE_COMPLETION;
+        result.parent = ret;
 
-            if (update_cache) {
-                SRV_TRC("%s", "updating prompt cache\n");
+        update_cache = update_cache && prompt_cache;
 
-                const int64_t t_start = ggml_time_us();
+        // cache prompts only for completion tasks
+        update_cache = update_cache && task.type == SERVER_TASK_TYPE_COMPLETION;
 
-                ret->prompt_save(*prompt_cache);
+        if (update_cache) {
+            result.cache_intent = SLOT_CACHE_INTENT_SAVE_AND_LOAD;
+        }
 
-                if (!ret->prompt_load(*prompt_cache, task.tokens)) {
-                    ret->prompt_clear();
+        if (ret->is_processing()) {
+            result.status = SLOT_SELECTION_SLOT_UNAVAILABLE;
+            return result;
+        }
+
+        const size_t n_children = task.is_parent() ? task.child_tasks.size() : 0;
+        result.children.reserve(n_children);
+
+        if (n_children > 0) {
+            for (auto & slot : slots) {
+                if (!slot.is_processing() && slot.id != ret->id) {
+                    result.children.push_back(&slot);
                 }
-
-                prompt_cache->update();
-
-                SRV_TRC("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
+                if (result.children.size() >= n_children) {
+                    break;
+                }
             }
         }
 
-        return ret;
+        result.n_children_available = result.children.size();
+        if (result.children.size() < n_children) {
+            result.children.clear();
+            result.status = SLOT_SELECTION_GROUP_UNAVAILABLE;
+            return result;
+        }
+
+        result.status = SLOT_SELECTION_READY;
+        return result;
     }
 
     // return true if at least one slot has been cleared
@@ -1758,28 +1990,55 @@ private:
         return output;
     }
 
-    bool launch_slot_with_task(server_slot & slot, server_task && task) {
+    enum prepared_lora_resident_intent {
+        PREPARED_LORA_RESIDENT_NONE,
+        PREPARED_LORA_RESIDENT_CLEAR,
+        PREPARED_LORA_RESIDENT_KEEP,
+    };
+
+    enum prepared_backend_sampler {
+        PREPARED_BACKEND_SAMPLER_KEEP,
+        PREPARED_BACKEND_SAMPLER_DETACH,
+        PREPARED_BACKEND_SAMPLER_ATTACH,
+    };
+
+    struct prepared_slot_launch {
+        server_slot * slot = nullptr;
+        std::unique_ptr<const server_task> task;
+
+        std::vector<common_adapter_lora_info> lora;
+        int32_t alora_invocation_start = -1;
+        prepared_lora_resident_intent lora_resident = PREPARED_LORA_RESIDENT_NONE;
+
+        common_sampler_ptr sampler;
+        prepared_backend_sampler backend_sampler = PREPARED_BACKEND_SAMPLER_KEEP;
+
+        slot_state state = SLOT_STATE_IDLE;
+    };
+
+    bool prepare_slot_launch(server_slot & slot, server_task && task, prepared_slot_launch & prepared) {
+        std::vector<common_adapter_lora_info> task_loras;
+        prepared_lora_resident_intent lora_resident = PREPARED_LORA_RESIDENT_NONE;
+
         // process per-request lora adapters
         if (!task.params.lora.empty()) {
-            auto task_loras = construct_lora_list(task.params.lora);
+            task_loras = construct_lora_list(task.params.lora);
             if (!are_lora_equal(task_loras, slot.lora)) {
                 // if lora has changed, check to see if the cache should be cleared
                 if (lora_should_clear_cache(slot.lora, task_loras)) {
-                    SLT_TRC(slot, "clearing cache for lora change. %zu loras -> %zu loras\n", slot.lora.size(), task.params.lora.size());
-                    slot.prompt.clear();
+                    lora_resident = PREPARED_LORA_RESIDENT_CLEAR;
                 } else {
-                    SLT_TRC(slot, "keeping cache for alora. %zu target loras\n", task_loras.size());
+                    lora_resident = PREPARED_LORA_RESIDENT_KEEP;
                 }
-                slot.lora = task_loras;
             }
         } else {
-            slot.lora = params_base.lora_adapters;
+            task_loras = params_base.lora_adapters;
         }
 
         // if using alora, make sure it's only a single one requested and active
         size_t alora_invocation_start = task.tokens.size();
-        if (lora_all_alora(slot.lora)) {
-            const auto & enabled_ids = lora_get_enabled_ids(slot.lora);
+        if (lora_all_alora(task_loras)) {
+            const auto & enabled_ids = lora_get_enabled_ids(task_loras);
             // TODO: This will error out if a user requests two aloras, but only
             // provides the activation string for one. We could, instead search
             // for all requested alora activation strings and then either keep
@@ -1788,7 +2047,7 @@ private:
                 send_error(task, "Cannot run multiple aLoRAs in a single request", ERROR_TYPE_INVALID_REQUEST);
                 return false;
             }
-            const auto & lora = slot.lora[enabled_ids[0]].ptr;
+            const auto & lora = task_loras[enabled_ids[0]].ptr;
 
             // get the pointer and count for the invocation tokens
             const uint64_t      n_invocation_tokens = llama_adapter_get_alora_n_invocation_tokens(lora);
@@ -1817,10 +2076,9 @@ private:
             // if the activation string is not found, disable the alora
             if (alora_invocation_start == task.tokens.size()) {
                 SLT_DBG(slot, "alora %zu requested, but not found. deactivating\n", enabled_ids[0]);
-                slot.lora[enabled_ids[0]].scale = 0.0f;
+                task_loras[enabled_ids[0]].scale = 0.0f;
             } else {
                 SLT_DBG(slot, "alora %zu activated starting at %zu\n", enabled_ids[0], alora_invocation_start);
-                slot.alora_invocation_start = alora_invocation_start;
             }
         }
 
@@ -1829,12 +2087,13 @@ private:
             return false;
         }
 
-        SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
-
         // initialize samplers
+        common_sampler_ptr sampler;
+        prepared_backend_sampler backend_sampler = PREPARED_BACKEND_SAMPLER_KEEP;
+
         if (task.need_sampling()) {
             try {
-                slot.smpl.reset(common_sampler_init(model_tgt, task.params.sampling));
+                sampler.reset(common_sampler_init(model_tgt, task.params.sampling));
             } catch (std::exception & e) {
                 std::string err_msg = std::string("Failed to initialize samplers: ") + e.what();
                 send_error(task, err_msg, ERROR_TYPE_INVALID_REQUEST);
@@ -1849,29 +2108,58 @@ private:
             use_backend_sampling &= !need_pre_sample_logits;
 
             // TODO: tmp until backend sampling is fully implemented
-            if (use_backend_sampling) {
-                llama_set_sampler(ctx_tgt, slot.id, common_sampler_get(slot.smpl.get()));
-            } else {
-                llama_set_sampler(ctx_tgt, slot.id, nullptr);
-            }
-
-            SLT_TRC(slot, "sampler chain: %s\n", common_sampler_print(slot.smpl.get()).c_str());
-            SLT_TRC(slot, "sampler params: \n%s\n", task.params.sampling.print().c_str());
-        } else {
-            slot.smpl.reset();
+            backend_sampler = use_backend_sampling
+                ? PREPARED_BACKEND_SAMPLER_ATTACH
+                : PREPARED_BACKEND_SAMPLER_DETACH;
         }
 
-        slot.task = std::make_unique<const server_task>(std::move(task));
+        prepared.slot                   = &slot;
+        prepared.lora                   = std::move(task_loras);
+        prepared.alora_invocation_start = alora_invocation_start < task.tokens.size() ? (int32_t) alora_invocation_start : -1;
+        prepared.lora_resident          = lora_resident;
+        prepared.sampler                = std::move(sampler);
+        prepared.backend_sampler        = backend_sampler;
+        prepared.state                  = task.is_child() ? SLOT_STATE_WAIT_OTHER : SLOT_STATE_STARTED;
+        prepared.task                   = std::make_unique<const server_task>(std::move(task));
 
-        slot.state = slot.task->is_child()
-            ? SLOT_STATE_WAIT_OTHER // wait for the parent to process prompt
-            : SLOT_STATE_STARTED;
+        return true;
+    }
+
+    void attach_prepared_slot(prepared_slot_launch && prepared) {
+        auto & slot = *prepared.slot;
+
+        if (prepared.lora_resident == PREPARED_LORA_RESIDENT_CLEAR) {
+            SLT_TRC(slot, "clearing cache for lora change. %zu loras -> %zu loras\n",
+                    slot.lora.size(), prepared.task->params.lora.size());
+            slot.prompt.clear();
+        } else if (prepared.lora_resident == PREPARED_LORA_RESIDENT_KEEP) {
+            SLT_TRC(slot, "keeping cache for alora. %zu target loras\n", prepared.lora.size());
+        }
+
+        slot.lora                   = std::move(prepared.lora);
+        slot.alora_invocation_start = prepared.alora_invocation_start;
+        slot.smpl                   = std::move(prepared.sampler);
+
+        SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
+
+        if (prepared.backend_sampler == PREPARED_BACKEND_SAMPLER_ATTACH) {
+            llama_set_sampler(ctx_tgt, slot.id, common_sampler_get(slot.smpl.get()));
+        } else if (prepared.backend_sampler == PREPARED_BACKEND_SAMPLER_DETACH) {
+            llama_set_sampler(ctx_tgt, slot.id, nullptr);
+        }
+
+        if (slot.smpl) {
+            SLT_TRC(slot, "sampler chain: %s\n", common_sampler_print(slot.smpl.get()).c_str());
+            SLT_TRC(slot, "sampler params: \n%s\n", prepared.task->params.sampling.print().c_str());
+        }
+
+        slot.task  = std::move(prepared.task);
+        slot.state = prepared.state;
 
         // reset server kill-switch counter
         n_empty_consecutive = 0;
 
         SLT_INF(slot, "processing task, is_child = %d\n", slot.task->is_child());
-        return true;
     }
 
     bool process_token(completion_token_output & result, server_slot & slot) {
@@ -2303,21 +2591,12 @@ private:
         return true;
     }
 
-    std::vector<server_slot *> get_free_slots(size_t n_slots_needed, int exclude_id_slot) {
-        std::vector<server_slot *> free_slots;
-        for (auto & slot : slots) {
-            if (!slot.is_processing() && slot.id != exclude_id_slot) {
-                free_slots.push_back(&slot);
-            }
-            if (free_slots.size() >= n_slots_needed) {
-                break;
-            }
-        }
-        return free_slots;
-    }
-
-    // launch multiple slots for parent + child tasks
-    bool launch_slots_with_parent_task(server_slot & parent_slot, std::vector<server_slot *> & child_slots, server_task && parent_task) {
+    // prepare multiple slots for parent + child tasks
+    bool prepare_slots_with_parent_task(
+            server_slot & parent_slot,
+            const std::vector<server_slot *> & child_slots,
+            server_task && parent_task,
+            std::vector<prepared_slot_launch> & prepared) {
         GGML_ASSERT(!parent_slot.is_processing());
         GGML_ASSERT(parent_task.is_parent());
         GGML_ASSERT(child_slots.size() == parent_task.child_tasks.size());
@@ -2326,35 +2605,24 @@ private:
 
         SRV_TRC("launching slots for parent task id_task = %d with %zu child tasks\n", id_parent, parent_task.child_tasks.size());
 
-        // to be called in case of failure to release all launched slots
-        auto release_slots = [this, id_parent]() {
-            for (auto & slot : slots) {
-                if (slot.is_processing() && (
-                        slot.task->id == id_parent ||
-                        slot.task->id_parent == id_parent
-                )) {
-                    slot.release();
-                }
-            }
-        };
+        prepared.reserve(child_slots.size() + 1);
 
-        // launch all child tasks first
+        // prepare all child tasks first
         size_t idx = 0;
-        GGML_ASSERT(child_slots.size() == parent_task.child_tasks.size());
         for (auto * slot : child_slots) {
             int id_child = parent_task.child_tasks[idx].id;
-            if (!launch_slot_with_task(*slot, std::move(parent_task.child_tasks[idx]))) {
+            prepared.emplace_back();
+            if (!prepare_slot_launch(*slot, std::move(parent_task.child_tasks[idx]), prepared.back())) {
                 SRV_ERR("failed to launch slot with child task, id_task = %d\n", id_child);
-                release_slots();
                 return false;
             }
             idx++;
         }
 
-        // finally, launch the parent task
-        if (!launch_slot_with_task(parent_slot, std::move(parent_task))) {
+        // finally, prepare the parent task
+        prepared.emplace_back();
+        if (!prepare_slot_launch(parent_slot, std::move(parent_task), prepared.back())) {
             SRV_ERR("failed to launch slot with task, id_task = %d\n", id_parent);
-            release_slots();
             return false;
         }
 
@@ -2400,10 +2668,20 @@ private:
         //       this is not true for SWA models: https://github.com/ggml-org/llama.cpp/pull/24411#issuecomment-4677983225
         cur.update_pos(slot.prompt.n_tokens() - n_tokens_cur, pos_min, pos_max);
 
+        auto state_spec = common_speculative_capture_state(spec.get(), slot.id);
+        const bool synchronized = state_spec.status == COMMON_SPECULATIVE_STATE_SYNCHRONIZED;
+        const bool stateful     = common_speculative_requires_state(spec.get());
+        const bool capture_dft  = ctx_dft != nullptr && (!stateful || synchronized);
+        GGML_ASSERT(!synchronized || ctx_dft != nullptr);
+
         cur.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-        cur.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-        // stash the draft's speculative state with the checkpoint
-        common_speculative_get_state(spec.get(), slot.id, cur.data_spec);
+
+        if (capture_dft) {
+            cur.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+        }
+        if (synchronized) {
+            cur.data_spec = std::move(state_spec.data);
+        }
 
         SLT_TRC(slot,
                 "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
@@ -2428,42 +2706,151 @@ private:
 
                     const int id_task = task.id;
 
-                    server_slot * slot = get_available_slot(task);
+                    const auto selection = select_slots(task);
 
                     //
                     // slot scheduling logic
                     //
 
-                    if (slot == nullptr) {
+                    if (selection.status == SLOT_SELECTION_NO_SLOT) {
                         // if no slot is available, we defer this task for processing later
                         SRV_DBG("no slot is available, defer task, id_task = %d\n", id_task);
                         queue_tasks.defer(std::move(task));
                         break;
                     }
 
-                    if (slot->is_processing()) {
+                    if (selection.status == SLOT_SELECTION_SLOT_UNAVAILABLE) {
                         // if requested slot is unavailable, we defer this task for processing later
                         SRV_DBG("requested slot is unavailable, defer task, id_task = %d\n", id_task);
                         queue_tasks.defer(std::move(task));
                         break;
                     }
 
+                    if (selection.status == SLOT_SELECTION_GROUP_UNAVAILABLE) {
+                        SRV_DBG("not enough free slots for child tasks, n_free = %zu, n_children = %zu, defer task, id_task = %d\n",
+                                selection.n_children_available, task.child_tasks.size(), id_task);
+                        queue_tasks.defer(std::move(task));
+                        break;
+                    }
+
+                    std::vector<prepared_slot_launch> prepared;
                     if (task.is_parent()) {
-                        // try getting free slots for all child tasks
-                        size_t n_child_tasks = task.child_tasks.size();
-                        std::vector<server_slot *> child_slots = get_free_slots(n_child_tasks, slot->id);
-                        if (child_slots.size() < n_child_tasks) {
-                            SRV_DBG("not enough free slots for child tasks, n_free = %zu, n_children = %zu, defer task, id_task = %d\n", child_slots.size(), n_child_tasks, id_task);
-                            queue_tasks.defer(std::move(task));
-                            break;
-                        }
-                        if (!launch_slots_with_parent_task(*slot, child_slots, std::move(task))) {
+                        if (!prepare_slots_with_parent_task(
+                                *selection.parent, selection.children, std::move(task), prepared)) {
                             SRV_ERR("failed to launch slot with parent task, id_task = %d\n", id_task);
                             break; // drop the task
                         }
-                    } else if (!launch_slot_with_task(*slot, std::move(task))) {
-                        SRV_ERR("failed to launch slot with task, id_task = %d\n", id_task);
-                        break; // drop the task
+                    } else {
+                        prepared.emplace_back();
+                        if (!prepare_slot_launch(*selection.parent, std::move(task), prepared.back())) {
+                            SRV_ERR("failed to launch slot with task, id_task = %d\n", id_task);
+                            break; // drop the task
+                        }
+                    }
+
+                    std::vector<server_speculative_policy_stream> active_streams;
+                    for (const auto & slot : slots) {
+                        if (slot.is_processing()) {
+                            active_streams.push_back({
+                                slot.id,
+                                common_speculative_eligible_mask(spec.get(), slot.id),
+                            });
+                        }
+                    }
+
+                    auto policy = server_speculative_plan_occupancy(
+                            active_streams,
+                            prepared.size(),
+                            common_speculative_loaded_mask(spec.get()),
+                            speculative_policy_limits);
+
+                    auto & prepared_parent = prepared.back();
+                    auto & parent_slot     = *selection.parent;
+
+                    const bool cache_intent = selection.cache_intent == SLOT_CACHE_INTENT_SAVE_AND_LOAD;
+                    const int64_t t_cache_start = cache_intent ? ggml_time_us() : 0;
+
+                    std::unique_ptr<server_prompt_cache_state> cached_prompt;
+                    if (cache_intent) {
+                        SRV_TRC("%s", "updating prompt cache\n");
+                        parent_slot.prompt_save(*prompt_cache);
+
+                        if (prepared_parent.lora_resident != PREPARED_LORA_RESIDENT_CLEAR) {
+                            cached_prompt = prompt_cache->take(parent_slot.prompt, prepared_parent.task->tokens);
+                        }
+                    }
+
+                    const size_t parent_idx = prepared.size() - 1;
+                    const uint32_t synchronized_stateful =
+                        common_speculative_stateful_synchronized_mask(spec.get(), parent_slot.id);
+                    const size_t n_resident = parent_slot.prompt.n_tokens();
+                    const size_t n_incoming = prepared_parent.task->tokens.size();
+                    const size_t n_resident_lcp =
+                        parent_slot.prompt.tokens.get_common_prefix(prepared_parent.task->tokens);
+                    const bool resident_reuse =
+                        !cached_prompt &&
+                        prepared_parent.lora_resident != PREPARED_LORA_RESIDENT_CLEAR &&
+                        prepared_parent.task->params.cache_prompt &&
+                        n_resident > 0 &&
+                        n_resident_lcp > 0;
+                    const bool strict_extension =
+                        !prepared_parent.task->is_child() &&
+                        resident_reuse &&
+                        n_resident < n_incoming &&
+                        n_resident_lcp == n_resident &&
+                        synchronized_stateful != 0 &&
+                        (policy.incoming_masks[parent_idx] & synchronized_stateful) != 0;
+
+                    if (resident_reuse && !strict_extension) {
+                        policy.incoming_masks[parent_idx] &= ~common_speculative_stateful_mask(spec.get());
+                    }
+
+                    std::vector<server_slot *> incoming_slots;
+                    incoming_slots.reserve(prepared.size());
+                    for (auto & cur : prepared) {
+                        incoming_slots.push_back(cur.slot);
+                        attach_prepared_slot(std::move(cur));
+                    }
+
+                    if (spec) {
+                        for (size_t i = 0; i < incoming_slots.size(); ++i) {
+                            common_speculative_reset_sequence(
+                                    spec.get(),
+                                    incoming_slots[i]->id,
+                                    policy.incoming_masks[i],
+                                    strict_extension && i == parent_idx);
+                        }
+                    }
+
+                    for (const auto & removal : policy.removals) {
+                        slots[removal.seq_id].request_spec_demote(removal.mask);
+                    }
+
+                    if (cached_prompt) {
+                        const uint32_t admitted_draft_mask =
+                            policy.incoming_masks[parent_idx] & common_speculative_draft_mask(spec.get());
+                        const auto restore_mode = admitted_draft_mask != 0
+                            ? SERVER_PROMPT_CACHE_RESTORE_WITH_SPEC
+                            : SERVER_PROMPT_CACHE_RESTORE_TARGET_ONLY;
+                        const auto restored = prompt_cache->apply(
+                                std::move(cached_prompt),
+                                restore_mode,
+                                parent_slot.prompt,
+                                ctx_tgt,
+                                ctx_dft,
+                                spec.get(),
+                                parent_slot.id);
+
+                        if (!restored.target) {
+                            parent_slot.prompt_clear();
+                        } else if (restored.reason != SERVER_PROMPT_CACHE_RESTORE_REASON_NONE) {
+                            parent_slot.request_spec_demote(admitted_draft_mask);
+                        }
+                    }
+
+                    if (cache_intent) {
+                        prompt_cache->update();
+                        SRV_TRC("prompt cache update took %.2f ms\n", (ggml_time_us() - t_cache_start) / 1000.0);
                     }
 
                     if (params_base.cache_idle_slots) {
@@ -2539,7 +2926,9 @@ private:
                     int n_processing_slots = 0;
 
                     for (server_slot & slot : slots) {
-                        json slot_data = slot.to_json(slots_debug == 0);
+                        json slot_data = slot.to_json(
+                                slots_debug == 0,
+                                !params_base.spec_active_limits.empty());
 
                         if (slot.is_processing()) {
                             n_processing_slots++;
@@ -2920,6 +3309,10 @@ private:
         // TODO: simplify and improve
         iterate(slots, [&](server_slot & slot) {
             if (slot.state == SLOT_STATE_GENERATING && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
+                if (slot.can_speculate() && !slot.spec_cycle_idle()) {
+                    return;
+                }
+
                 if (!params_base.ctx_shift) {
                     // this check is redundant (for good)
                     // we should never get here, because generation should already stopped in process_token()
@@ -2957,6 +3350,7 @@ private:
 
                 SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
 
+                slot.request_spec_demote(common_speculative_stateful_eligible_mask(spec.get(), slot.id));
                 slot.mem.seq_rm (slot.id, n_keep            , n_keep + n_discard);
                 slot.mem.seq_add(slot.id, n_keep + n_discard, slot.prompt.tokens.pos_next(), -n_discard);
 
@@ -3171,6 +3565,15 @@ private:
                         // keep track how many tokens we can reuse from the previous state
                         int n_past = 0;
 
+                        const int n_resident = slot.prompt.n_tokens();
+                        uint32_t resident_stateful_mask = common_speculative_stateful_eligible_mask(spec.get(), slot.id);
+                        bool resident_spec_replaced = false;
+
+                        auto demote_resident_spec = [&]() {
+                            slot.request_spec_demote(resident_stateful_mask);
+                            resident_stateful_mask = 0;
+                        };
+
                         // empty prompt passed -> release the slot and send empty response
                         if (input_tokens.empty()) {
                             SLT_WRN(slot, "%s", "empty prompt - releasing slot\n");
@@ -3274,6 +3677,7 @@ private:
 
                                             const int64_t kv_shift = (int64_t) head_p - (int64_t) head_c;
 
+                                            demote_resident_spec();
                                             slot.mem.seq_rm (slot.id, head_p, head_c);
                                             slot.mem.seq_add(slot.id, head_c, head_c + n_match, kv_shift);
 
@@ -3373,23 +3777,31 @@ private:
                                     bool do_reset = it == slot.prompt.checkpoints.rend();
 
                                     if (!do_reset) {
-                                        // restore the context checkpoint
-                                        it->load_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                                        it->load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                                        // restore the draft's speculative state
-                                        const bool restored_spec = common_speculative_set_state(spec.get(), slot.id, it->data_spec);
-                                        if (!restored_spec) {
-                                            SLT_WRN(slot, "%s", "failed to restore synchronized speculative checkpoint; forcing prompt re-processing\n");
-                                            do_reset = true;
-                                        } else if (!it->data_spec.empty()) {
-                                            SLT_TRC(slot, "restored speculative checkpoint state (size = %.3f KiB)\n",
-                                                    it->data_spec.size() / 1024.0);
-                                        }
-
-                                        if (!do_reset) {
+                                        if (it->try_load_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY)) {
                                             pos_next = std::min(pos_next, std::max(it->pos_min + 1, it->pos_max));
                                             n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) it->n_tokens);
                                             SLT_TRC(slot, "restored context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB)\n", it->pos_min, it->pos_max, it->n_tokens, n_past, (float) it->size() / 1024 / 1024);
+
+                                            if (resident_stateful_mask != 0) {
+                                                const bool restored_spec =
+                                                    it->try_load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) &&
+                                                    common_speculative_restore_state(spec.get(), slot.id, it->data_spec) ==
+                                                        COMMON_SPECULATIVE_STATE_SYNCHRONIZED;
+
+                                                if (restored_spec) {
+                                                    resident_spec_replaced = true;
+                                                    SLT_TRC(slot, "restored speculative checkpoint state (size = %.3f KiB)\n",
+                                                            it->data_spec.size() / 1024.0);
+                                                } else {
+                                                    llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, -1, -1);
+                                                    demote_resident_spec();
+                                                    SLT_WRN(slot, "%s", "failed to restore synchronized speculative checkpoint; keeping target checkpoint\n");
+                                                }
+                                            } else if (!common_speculative_requires_state(spec.get())) {
+                                                it->load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                                            }
+                                        } else {
+                                            do_reset = true;
                                         }
                                     }
 
@@ -3418,9 +3830,14 @@ private:
 
                         // [TAG_PROMPT_LOGITS]
                         if (n_past == slot.task->n_tokens() && n_past > 0) {
+                            demote_resident_spec();
                             SLT_WRN(slot, "need to evaluate at least 1 token for each active slot (n_past = %d, task.n_tokens() = %d)\n", n_past, slot.task->n_tokens());
                             n_past--;
                             SLT_WRN(slot, "n_past was set to %d\n", n_past);
+                        }
+
+                        if (n_past < n_resident && !resident_spec_replaced) {
+                            demote_resident_spec();
                         }
 
                         slot.n_prompt_tokens_cache = n_past;
@@ -3672,6 +4089,11 @@ private:
             }
         }
 
+        if (spec) {
+            const bool need_embd_nextn = common_speculative_need_embd_nextn(spec.get(), batch_view);
+            llama_set_embeddings_nextn(ctx_tgt, need_embd_nextn, /*masked*/ false);
+        }
+
         const int ret = llama_decode(ctx_tgt, batch_view);
 
         metrics.on_decoded(slots);
@@ -3746,7 +4168,7 @@ private:
                     }
                 }
 
-                // all children slots should already launched by launch_slots_with_parent_task()
+                // all children slots were attached with the parent admission
                 // copy state to the child slots
                 for (auto & child : children) {
                     SLT_TRC(slot, " - copying state to child %d\n", child->id);
@@ -3976,6 +4398,7 @@ private:
             SLT_DBG(slot, "add accepted tokens: sampled=%d, ids.size=%zu, n_draft=%zu\n", slot.sampled, ids.size(), n_draft);
 
             slot.mem.seq_rm(slot.id, slot.prompt.tokens.pos_next(), -1);
+            slot.finish_spec_cycle();
 
             for (size_t i = 0; i < ids.size(); ++i) {
                 completion_token_output result;
@@ -4670,6 +5093,9 @@ void server_routes::init_routes() {
             if (!tmpl_tools.empty()) {
                 props["chat_template_tool_use"] = tmpl_tools;
             }
+        }
+        if (!params.spec_active_limits.empty()) {
+            props["speculative_active_limits"] = speculative_active_limits_to_json(params.spec_active_limits);
         }
         res->ok(props);
         return res;

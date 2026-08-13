@@ -198,6 +198,18 @@ Example Video:
 - ngram-map-k looks for a previous matching n-gram and inserts the following m-gram but uses an internal hash-map of n-grams in the current context window.
 - ngram-mod uses a hash pool which is shared across all server slots. The hash pool is a map from n-gram hash to the next token (not the next m-gram as in ngram-map).
 
+## Occupancy-based server policy
+
+`llama-server` can limit loaded MTP and n-gram implementations by active stream count:
+
+```text
+--spec-active-limit draft-mtp=1,ngram-mod=2
+```
+
+The limit applies to incoming and already active requests. Losing eligibility is sticky for the rest of that request; a later request is evaluated afresh. The option is server-wide, not part of the request JSON API. A non-empty mapping must name every loaded implementation, every named implementation must be loaded, and each limit must be between one and `--parallel`. Dynamic active limits currently support MTP and the n-gram implementations only; draft-simple, Eagle3, DFlash and DSpark remain static-only. Omitting the option preserves the static speculative behavior.
+
+When configured, the effective mapping is logged once after speculative initialization and is exposed by `GET /props` as `speculative_active_limits`, an object keyed by speculative implementation name. `GET /slots` preserves its existing Boolean `speculative` field and adds a `speculative_policy` object containing the slot phase, eligible mask and implementation names, any pending demotion mask and names, and synchronized stateful or MTP readiness when those implementations are loaded. Both additions are omitted when `--spec-active-limit` is not configured.
+
 ## Command-Line Options
 
 If a draft model is combined with a draftless decoding the draftless decoding has higher precedence.

@@ -1,5 +1,38 @@
 # Performance results
 
+## Dynamic speculative scheduler mechanism validation
+
+Qwen3.6 35B-A3B Q8_0 with embedded MTP, four-slot server, partitioned BF16 KV,
+batch 8,192 / microbatch 1,024, 8,192 prompt tokens and 4,096 generated tokens.
+Occupancy changes the admitted implementation mask while server capacity stays
+fixed at four slots.
+
+| Active requests | Dynamic mode | Dynamic prefill median | Matching fixed control | Fixed prefill median | Difference |
+|---:|---|---:|---|---:|---:|
+| 1 | MTP + ngram-mod | 4,385.8 | MTP + ngram-mod | 4,392.1 | -0.14% |
+| 2 | ngram-mod | 4,710.7 | ngram-mod | 4,838.7 | -2.64% |
+| 4 | none | 4,777.8 | none | 4,727.7 | +1.06% |
+
+All three dynamic configurations completed one warmup and three measured waves
+without runtime or hard output-integrity failure. Slot visibility confirmed the
+effective masks: MTP + ngram-mod at occupancy one, ngram-mod only at occupancy
+two, and an empty speculative mask at occupancy four. At four active requests, where
+both sides perform no speculative decoding, dynamic decode was 164.41 t/s versus
+167.91 t/s fixed no-spec (-2.08%) and end-to-end generation was 156.48 versus
+159.49 t/s (-1.89%). This measures the residual cost of keeping the dynamic MTP
+machinery resident. Single- and two-request speculative decode rates are not
+used as scheduler gates because acceptance varies with generated content.
+
+Unified RAM-cache interaction also passed:
+
+| Restore case | Cached tokens | Evaluated tokens | Post-restore state |
+|---|---:|---:|---|
+| Synchronized solo MTP, strict extension | 8,447 | 1 | MTP ready |
+| Target-only entry created at occupancy two | 8,188 | 4 | MTP disabled; target hit retained |
+
+The target-only restore still used ngram-mod drafting. That is expected and is
+not MTP promotion.
+
 ## Single-request 8K prefill comparison
 
 Qwen3.6 35B-A3B Q8_0, BF16 KV, no speculation:
@@ -90,4 +123,3 @@ so the combined configuration is not presented as a clean universal result.
 The 27B combined suite was slower in absolute terms and had one extra closing
 reasoning tag, but no null-byte or token-soup pattern. These observations are
 included as correctness caveats rather than headline performance claims.
-

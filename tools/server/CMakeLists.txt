@@ -13,6 +13,8 @@ add_library(${TARGET} STATIC
     server-queue.h
     server-common.cpp
     server-common.h
+    server-speculative-policy.cpp
+    server-speculative-policy.h
     server-context.cpp
     server-context.h
     server-stream.cpp

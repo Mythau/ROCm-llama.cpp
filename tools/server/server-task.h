@@ -638,6 +638,28 @@ struct server_prompt_cache_state {
     }
 };
 
+enum server_prompt_cache_restore_mode {
+    SERVER_PROMPT_CACHE_RESTORE_TARGET_ONLY,
+    SERVER_PROMPT_CACHE_RESTORE_WITH_SPEC,
+};
+
+enum server_prompt_cache_restore_reason {
+    SERVER_PROMPT_CACHE_RESTORE_REASON_NONE,
+    SERVER_PROMPT_CACHE_RESTORE_REASON_TARGET_FAILED,
+    SERVER_PROMPT_CACHE_RESTORE_REASON_OPTIONAL_MISSING,
+    SERVER_PROMPT_CACHE_RESTORE_REASON_DRAFT_FAILED,
+    SERVER_PROMPT_CACHE_RESTORE_REASON_SPEC_FAILED,
+};
+
+struct server_prompt_cache_restore_result {
+    bool found  = false;
+    bool target = false;
+    bool draft  = false;
+    bool spec   = false;
+
+    server_prompt_cache_restore_reason reason = SERVER_PROMPT_CACHE_RESTORE_REASON_NONE;
+};
+
 struct server_prompt_cache {
     server_prompt_cache(int32_t limit_size_mib, size_t limit_tokens) {
         this->limit_size   = 1024ull*1024ull*(limit_size_mib < 0 ? 0 : limit_size_mib);
@@ -661,6 +683,19 @@ struct server_prompt_cache {
             size_t state_size_main,
             size_t state_size_drft,
             size_t state_size_spec);
+
+    std::unique_ptr<server_prompt_cache_state> take(
+            const server_prompt & prompt,
+            const server_tokens & tokens_new);
+
+    server_prompt_cache_restore_result apply(
+            std::unique_ptr<server_prompt_cache_state> state,
+            server_prompt_cache_restore_mode mode,
+            server_prompt & prompt,
+            llama_context * ctx_tgt,
+            llama_context * ctx_dft,
+            common_speculative * spec,
+            int32_t id_slot);
 
     bool load(
             server_prompt & prompt,

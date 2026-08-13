@@ -38,6 +38,20 @@ common_speculative * common_speculative_init(common_params_speculative & params,
 
 void common_speculative_free(common_speculative * spec);
 
+bool common_speculative_is_loaded(const common_speculative * spec, enum common_speculative_type type);
+bool common_speculative_is_eligible(const common_speculative * spec, llama_seq_id seq_id, enum common_speculative_type type);
+uint32_t common_speculative_loaded_mask(const common_speculative * spec);
+uint32_t common_speculative_eligible_mask(const common_speculative * spec, llama_seq_id seq_id);
+uint32_t common_speculative_draft_mask(const common_speculative * spec);
+uint32_t common_speculative_stateful_mask(const common_speculative * spec);
+uint32_t common_speculative_stateful_synchronized_mask(const common_speculative * spec, llama_seq_id seq_id);
+void common_speculative_disable_mask(common_speculative * spec, llama_seq_id seq_id, uint32_t mask);
+
+// Admission reset is the only operation that can add eligibility.
+void common_speculative_reset_sequence(common_speculative * spec, llama_seq_id seq_id);
+void common_speculative_reset_sequence(
+        common_speculative * spec, llama_seq_id seq_id, uint32_t incoming_mask, bool preserve_stateful);
+
 struct common_speculative_draft_params {
     // this flag is used to chain the drafts through all the available implementations
     // after the first successful draft from an implementation, we set it
@@ -70,19 +84,39 @@ bool common_speculative_process(common_speculative * spec, const llama_batch & b
 // true if any implementation requires target post-norm embeddings to be extracted
 bool common_speculative_need_embd(common_speculative * spec);
 
-// true if any implementation requires target nextn embeddings to be extracted
-bool common_speculative_need_embd_nextn(common_speculative * spec);
+// true if any implementation requires target nextn embeddings for this batch view
+bool common_speculative_need_embd_nextn(common_speculative * spec, const llama_batch & batch);
 
 // generate drafts for the sequences specified with `common_speculative_get_draft_params`
 void common_speculative_draft(common_speculative * spec);
 
+bool common_speculative_cycle_active(const common_speculative * spec, llama_seq_id seq_id);
+void common_speculative_abandon_cycle(common_speculative * spec, llama_seq_id seq_id);
+
 // informs the speculative context that n_accepted tokens were accepted by the target model
 void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t n_accepted);
 
-// (optional) get/set internal state
+enum common_speculative_state_status {
+    COMMON_SPECULATIVE_STATE_TARGET_ONLY,
+    COMMON_SPECULATIVE_STATE_SYNCHRONIZED,
+    COMMON_SPECULATIVE_STATE_INVALID,
+};
+
+struct common_speculative_state_result {
+    common_speculative_state_status status = COMMON_SPECULATIVE_STATE_TARGET_ONLY;
+    std::vector<uint8_t> data;
+};
+
+common_speculative_state_result common_speculative_capture_state(common_speculative * spec, llama_seq_id seq_id);
+common_speculative_state_status common_speculative_restore_state(
+        common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
+void common_speculative_clear_state(common_speculative * spec, llama_seq_id seq_id);
+
+// Transitional wrappers for server capture call sites; DS-05A2 moves them to the structured API.
 bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data);
 bool common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
 bool common_speculative_requires_state(const common_speculative * spec);
+uint32_t common_speculative_stateful_eligible_mask(const common_speculative * spec, llama_seq_id seq_id);
 
 // print statistics about the speculative decoding
 void common_speculative_print_stats(const common_speculative * spec);

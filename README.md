@@ -1,14 +1,17 @@
 # Experimental ROCm patch fork
 
 This branch is an experimental, minimally maintained collection of ROCm changes
-for RDNA 3 (`gfx1100`) and RDNA 4 (`gfx1201`), plus a unified-KV prompt-cache
-restore fix. It is published for home-server users and for selective
+for RDNA 3 (`gfx1100`) and RDNA 4 (`gfx1201`), a unified-KV prompt-cache
+restore fix, and occupancy-driven dynamic MTP/ngram admission. It is published for home-server users and for selective
 cherry-picking. It is not an official llama.cpp build or a supported downstream
 distribution. See [ROCM_FORK.md](ROCM_FORK.md) before using it.
 
 The custom commit stack is explicitly catalogued in
 [PATCHES.md](PATCHES.md), including provenance, hardware/workload labels and
 dependencies.
+
+Dynamic speculation behavior, invocation, validation and limitations are in
+[DYNAMIC_SPECULATION_PATCH_NOTES.md](DYNAMIC_SPECULATION_PATCH_NOTES.md).
 
 # llama.cpp
 

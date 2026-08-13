@@ -11,6 +11,7 @@
 #include "fit.h"
 #include "llama.h"
 #include "log.h"
+#include "speculative.h"
 
 #include <atomic>
 #include <clocale>
@@ -153,6 +154,16 @@ int llama_server(common_params & params, int argc, char ** argv) {
 
             params.n_parallel = 4;
             params.kv_unified = true;
+        }
+
+        for (const auto & limit : params.spec_active_limits) {
+            if (limit.max_active_streams > params.n_parallel) {
+                SRV_ERR("speculative active limit for '%s' (%d) exceeds n_parallel (%d)\n",
+                        common_speculative_type_to_str(limit.type).c_str(),
+                        limit.max_active_streams,
+                        params.n_parallel);
+                return 1;
+            }
         }
     }
 

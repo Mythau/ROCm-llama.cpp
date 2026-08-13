@@ -2212,6 +2212,28 @@ void common_prompt_checkpoint::load_dft(
     }
 }
 
+bool common_prompt_checkpoint::try_load_tgt(
+        llama_context * ctx,
+        llama_seq_id seq_id,
+        llama_state_seq_flags flags) const {
+    if (ctx == nullptr || data_tgt.empty()) {
+        return false;
+    }
+
+    return llama_state_seq_set_data_ext(ctx, data_tgt.data(), data_tgt.size(), seq_id, flags) == data_tgt.size();
+}
+
+bool common_prompt_checkpoint::try_load_dft(
+        llama_context * ctx,
+        llama_seq_id seq_id,
+        llama_state_seq_flags flags) const {
+    if (ctx == nullptr || data_dft.empty()) {
+        return false;
+    }
+
+    return llama_state_seq_set_data_ext(ctx, data_dft.data(), data_dft.size(), seq_id, flags) == data_dft.size();
+}
+
 void common_prompt_checkpoint::clear_tgt() {
     data_tgt.clear();
 }
