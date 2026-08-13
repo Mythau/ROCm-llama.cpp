@@ -25,9 +25,23 @@ Next work:
 
 ## TEST-WIN-001: standalone speculative-control test divides by zero
 
-Status: observed; not investigated.
+Status: resolved; the standalone control test has been restored with test-local
+timer initialization.
 
-The isolated Windows CPU test executable `test-speculative-control.exe` exited with integer divide-by-zero (`0xC0000094`) while exercising speculative `begin()`. The live server, GPU inference and production binary were not involved. The cause has not been established and no fix is included in the dynamic-speculation work.
+The isolated Windows CPU test executable `test-speculative-control.exe` exited
+with integer divide-by-zero (`0xC0000094`) while exercising speculative
+`begin()`. The live server, GPU inference and production binary were not
+involved.
+
+The removed fixture called `common_speculative_begin()` without first
+initializing GGML timing. On Windows, `ggml_time_us()` therefore divided by the
+zero-initialized `timer_freq`. Production llama-server is unaffected because it
+calls `llama_backend_init()`, which initializes GGML timing before speculative
+work.
+
+The restored test calls `ggml_time_init()` inside its test function, immediately
+before constructing and exercising the timed speculative control system. No
+server entry-point, speculative implementation or GGML timing guard was added.
 
 ## NEXTN-DYNAMIC-001: other draft implementations are not supported by dynamic active limits
 
