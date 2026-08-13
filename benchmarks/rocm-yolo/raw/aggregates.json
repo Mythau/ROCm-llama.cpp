@@ -125,6 +125,50 @@
       "all_hard_checks_passed": true
     }
   ],
+  "two_slot_mtp_dynamic_isolation_b2048_u512": {
+    "active_mtp_fresh_processes": {
+      "dynamic_patch": {
+        "policy": "draft-mtp=2",
+        "aggregate_prefill_values": [3163.6039720839753, 3166.255569427893, 3124.4476817872087],
+        "aggregate_prefill_median": 3163.6039720839753,
+        "active_decode_values": [151.59153270690206, 132.44837533142993, 144.70939459201384],
+        "active_decode_median": 144.70939459201384,
+        "end_to_end_values": [140.253279480183, 123.71903341061795, 135.4138731632072],
+        "end_to_end_median": 135.4138731632072,
+        "mtp_active_all_samples": true
+      },
+      "original_yolo": {
+        "policy": "static-mtp",
+        "aggregate_prefill_values": [3166.1235294864478, 3198.471730226401, 3193.1582219448824],
+        "aggregate_prefill_median": 3193.1582219448824,
+        "active_decode_values": [143.35660603235218, 143.2235590432365, 141.83663366997482],
+        "active_decode_median": 143.2235590432365,
+        "end_to_end_values": [133.18141461162693, 133.1758414127124, 131.95486843250737],
+        "end_to_end_median": 133.1758414127124,
+        "mtp_active_all_samples": true
+      },
+      "dynamic_prefill_difference_percent": -0.9255491838079388
+    },
+    "resident_mtp_gated_vs_same_build_no_spec": {
+      "mtp_loaded_gated": {
+        "policy": "draft-mtp=1",
+        "aggregate_prefill_values": [3985.498468025375, 3975.484672946383, 3976.1508607551195],
+        "aggregate_prefill_median": 3976.1508607551195,
+        "active_decode_median": 111.21241595612427,
+        "end_to_end_median": 106.95385810806089,
+        "mtp_proposals": 0
+      },
+      "true_no_spec": {
+        "aggregate_prefill_values": [4051.0082866658036, 4038.5514043456133, 4061.1164312463447],
+        "aggregate_prefill_median": 4051.0082866658036,
+        "active_decode_median": 113.51805430309898,
+        "end_to_end_median": 109.15867318458896
+      },
+      "prefill_difference_percent": -1.8478714584979405,
+      "decode_difference_percent": -2.0310763438726065,
+      "end_to_end_difference_percent": -2.0198258298721683
+    }
+  },
   "dynamic_speculation_cache_restore": {
     "synchronized_solo_mtp": {
       "cached_tokens": 8447,

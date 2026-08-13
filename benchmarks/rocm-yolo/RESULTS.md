@@ -33,6 +33,39 @@ Unified RAM-cache interaction also passed:
 The target-only restore still used ngram-mod drafting. That is expected and is
 not MTP promotion.
 
+## Two-slot MTP-only dynamic isolation
+
+Qwen3.6 35B-A3B Q8_0, genuine two-slot servers, two simultaneous requests,
+partitioned BF16 KV, batch 2,048 / microbatch 512 and 8K prompt / 4K generation.
+The active-MTP comparison used three independently launched fresh server
+processes per build so resident prompt reuse could not change MTP eligibility.
+
+| Build / policy | MTP state | Prefill values | Prefill median | Decode median | End-to-end median |
+|---|---|---|---:|---:|---:|
+| Dynamic patch, `draft-mtp=2` | active on both requests | 3,163.6 / 3,166.3 / 3,124.4 | 3,163.6 | 144.71 | 135.41 |
+| Original YOLO, static MTP | active on both requests | 3,166.1 / 3,198.5 / 3,193.2 | 3,193.2 | 143.22 | 133.18 |
+
+The dynamic patch was **0.93% lower in aggregate prefill** than the original
+static-MTP build. Both cohorts produced and accepted thousands of MTP drafts in
+every sample. The decode medians differ by about 1%, but the dynamic samples
+ranged from 132.45 to 151.59 t/s as generated content changed acceptance, so
+decode is recorded rather than treated as a mechanism regression or gain.
+
+The cost of keeping MTP resident while dynamically disabling its work was
+measured separately on the dynamic build. These runs used one warmup plus three
+measured waves:
+
+| Dynamic-build configuration | Prefill median | Decode median | End-to-end median |
+|---|---:|---:|---:|
+| MTP loaded, `draft-mtp=1`, two active requests | 3,976.2 | 111.21 | 106.95 |
+| True no-spec; MTP not loaded | 4,051.0 | 113.52 | 109.16 |
+| Resident-but-gated difference | **-1.85%** | **-2.03%** | **-2.02%** |
+
+Slot state and server statistics confirmed an empty eligible mask, `mtp_ready`
+false, zero MTP proposals and zero draft/spec cache bytes in the gated case.
+The residual loss therefore measures resident context/rollback and dynamic-path
+overhead, not accidental MTP prompt mirroring or drafting.
+
 ## Single-request 8K prefill comparison
 
 Qwen3.6 35B-A3B Q8_0, BF16 KV, no speculation:

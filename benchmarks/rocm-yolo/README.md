@@ -17,6 +17,11 @@ machine-local paths.
   prefill at one active request, **-2.64%** at two, and **+1.06%** at four.
   With all speculation gated at four requests, decode was **2.08%** below a
   true no-spec server.
+- With MTP active on both slots, the dynamic patch was **0.93%** below the
+  original YOLO static-MTP build in prefill across three fresh-server samples.
+  When MTP was loaded but gated off at two active requests, it remained
+  **1.85%** below a same-build true no-spec server in prefill and about **2.0%**
+  below it in decode/end-to-end throughput.
 - Dynamic cache restoration retained MTP after a synchronized solo restore
   (**8,447 cached / 1 evaluated**) and retained the target hit without
   promoting MTP for an occupancy-two target-only entry (**8,188 / 4**).
