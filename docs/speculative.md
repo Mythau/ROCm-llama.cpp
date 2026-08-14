@@ -212,6 +212,16 @@ When configured, the effective mapping is logged once after speculative initiali
 
 `--spec-ngram-mod-pool-update loaded|eligible` controls whether requests that are dynamically ineligible for `ngram-mod` still update its shared resident pool. The default, `loaded`, records prompt and accepted decode history from every generating request while `ngram-mod` is loaded, without allowing ineligible requests to propose or accept drafts. `eligible` updates the pool only for requests currently allowed to propose. The selected value is logged at startup and exposed by `GET /props` as `speculative_ngram_mod_pool_update`. Speculative trace statistics report eligible and ineligible pool-update counts separately.
 
+### Deferred MTP prefill
+
+`--spec-mtp-deferred` allows an MTP implementation excluded by the occupancy policy to retain the target model's completed NextN rows in ordinary DRAM instead of building draft KV immediately. When demand later permits MTP, the server reconstructs the MTP KV cache from that archive at an idle speculative-cycle boundary and then enables ordinary MTP drafting for the request.
+
+The first implementation supports separate target/draft memory with one MTP head. The option is rejected for shared-memory or chained-head MTP and has no per-request override. Immediate MTP requests continue using the existing path and create no archive. Parent/child multi-completion requests remain target-only.
+
+The archive is stored as immutable logical-position blocks whose actual row counts are independent of server batch and microbatch settings. A live archive follows its target prompt/KV lineage. When saved in the RAM prompt cache, the same archive reference is attached without copying its rows and its retained bytes count against the existing prompt-cache limit. Context shifting, non-contiguous reuse, slot-file restore, or another incompatible target-KV replacement discards the archive in this version.
+
+When enabled, `GET /props` reports `speculative_mtp_deferred: true`. `GET /slots` adds the MTP prefill mode, capture/backfill state and finalized archive coverage to `speculative_policy`. This is experimental production integration: CPU archive and compile regressions are covered, while model-backed mixed-slot, cache-restore and performance validation remain required.
+
 ## Command-Line Options
 
 If a draft model is combined with a draftless decoding the draftless decoding has higher precedence.

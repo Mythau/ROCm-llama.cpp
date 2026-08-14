@@ -14,6 +14,7 @@
 using json = nlohmann::ordered_json;
 
 struct common_speculative;
+struct common_speculative_hidden_archive;
 
 enum server_task_type {
     SERVER_TASK_TYPE_COMPLETION,
@@ -619,10 +620,9 @@ struct server_prompt_data {
     std::vector<uint8_t> main;
     std::vector<uint8_t> drft;
     std::vector<uint8_t> spec;
+    std::shared_ptr<const common_speculative_hidden_archive> hidden_archive;
 
-    size_t size() const {
-        return main.size() + drft.size() + spec.size();
-    }
+    size_t size() const;
 };
 
 struct server_prompt_cache_state {
@@ -644,6 +644,7 @@ struct server_prompt_cache_state {
 enum server_prompt_cache_restore_mode {
     SERVER_PROMPT_CACHE_RESTORE_TARGET_ONLY,
     SERVER_PROMPT_CACHE_RESTORE_WITH_SPEC,
+    SERVER_PROMPT_CACHE_RESTORE_WITH_ARCHIVE,
 };
 
 enum server_prompt_cache_restore_reason {
@@ -659,6 +660,7 @@ struct server_prompt_cache_restore_result {
     bool target = false;
     bool draft  = false;
     bool spec   = false;
+    std::shared_ptr<const common_speculative_hidden_archive> hidden_archive;
 
     server_prompt_cache_restore_reason reason = SERVER_PROMPT_CACHE_RESTORE_REASON_NONE;
 };
@@ -686,7 +688,8 @@ struct server_prompt_cache {
             const std::string & prompt_cache_key,
             size_t state_size_main,
             size_t state_size_drft,
-            size_t state_size_spec);
+            size_t state_size_spec,
+            std::shared_ptr<const common_speculative_hidden_archive> hidden_archive = {});
 
     std::unique_ptr<server_prompt_cache_state> take(
             const server_prompt & prompt,

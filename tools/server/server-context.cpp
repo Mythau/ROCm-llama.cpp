@@ -66,6 +66,12 @@ enum slot_state {
     SLOT_STATE_GENERATING,
 };
 
+enum slot_mtp_prefill_mode {
+    SLOT_MTP_PREFILL_TARGET_ONLY,
+    SLOT_MTP_PREFILL_IMMEDIATE,
+    SLOT_MTP_PREFILL_DEFERRED,
+};
+
 static const char * slot_state_to_str(slot_state state) {
     static const char * const names[] = {
         "idle",
@@ -76,6 +82,15 @@ static const char * slot_state_to_str(slot_state state) {
         "generating",
     };
     return names[state];
+}
+
+static const char * slot_mtp_prefill_mode_to_str(slot_mtp_prefill_mode mode) {
+    switch (mode) {
+        case SLOT_MTP_PREFILL_TARGET_ONLY: return "target-only";
+        case SLOT_MTP_PREFILL_IMMEDIATE:   return "immediate";
+        case SLOT_MTP_PREFILL_DEFERRED:    return "deferred";
+    }
+    GGML_ABORT("invalid MTP prefill mode");
 }
 
 static json speculative_types_from_mask(uint32_t mask) {
@@ -268,6 +283,10 @@ struct server_slot {
     common_prompt_checkpoint spec_ckpt;
     bool spec_is_replay = false;
     uint32_t spec_demote_pending = 0;
+    slot_mtp_prefill_mode mtp_prefill_mode = SLOT_MTP_PREFILL_TARGET_ONLY;
+    bool mtp_capture_active = false;
+    bool mtp_backfill_blocked = false;
+    common_speculative_hidden_archive_ref mtp_hidden_archive;
 
     // TODO: move members that belong to the task (such as `generated_text`, `has_new_line`) to task_results_state
     //       see https://github.com/ggml-org/llama.cpp/pull/18283#issuecomment-3710175837
@@ -309,28 +328,60 @@ struct server_slot {
     server_prompt prompt;
     std::string prompt_cache_key;
 
-    bool prompt_save(server_prompt_cache & prompt_cache) const {
+    void clear_mtp_archive() {
+        if (mtp_capture_active) {
+            common_speculative_mtp_capture_discard(spec, id);
+        }
+        mtp_capture_active = false;
+        mtp_backfill_blocked = false;
+        mtp_hidden_archive.reset();
+        mtp_prefill_mode = SLOT_MTP_PREFILL_TARGET_ONLY;
+    }
+
+    void finalize_mtp_archive() {
+        if (!mtp_capture_active) {
+            return;
+        }
+
+        const llama_pos pos_end = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), id);
+        mtp_hidden_archive = common_speculative_mtp_capture_finalize(spec, id, pos_end);
+        mtp_capture_active = false;
+        if (!mtp_hidden_archive) {
+            mtp_prefill_mode = SLOT_MTP_PREFILL_TARGET_ONLY;
+        }
+    }
+
+    bool prompt_save(server_prompt_cache & prompt_cache) {
         if (prompt.tokens.size() == 0) {
             return false;
         }
 
-        auto state_spec = common_speculative_capture_state(spec, id);
+        finalize_mtp_archive();
+
+        auto state_spec = mtp_hidden_archive
+            ? common_speculative_state_result {}
+            : common_speculative_capture_state(spec, id);
         const bool synchronized = state_spec.status == COMMON_SPECULATIVE_STATE_SYNCHRONIZED;
         const bool stateful     = common_speculative_requires_state(spec);
-        const bool capture_dft  = ctx_dft != nullptr && (!stateful || synchronized);
+        const bool capture_dft  = !mtp_hidden_archive && ctx_dft != nullptr && (!stateful || synchronized);
         GGML_ASSERT(!synchronized || ctx_dft != nullptr);
 
         const size_t cur_size_tgt =           llama_state_seq_get_size_ext(ctx_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
         const size_t cur_size_dft = capture_dft ? llama_state_seq_get_size_ext(ctx_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE) : 0;
         const size_t cur_size_spec = synchronized ? state_spec.data.size() : 0;
+        const size_t cur_size_archive = mtp_hidden_archive
+            ? common_speculative_hidden_archive_get_info(mtp_hidden_archive).retained_bytes
+            : 0;
 
-        const size_t cur_size = cur_size_tgt + cur_size_dft + cur_size_spec;
+        const size_t cur_size = cur_size_tgt + cur_size_dft + cur_size_spec + cur_size_archive;
 
-        SRV_TRC(" - saving prompt with length %d, total state size = %.3f MiB (draft: %.3f MiB, spec: %.3f MiB)\n",
+        SRV_TRC(" - saving prompt with length %d, total state size = %.3f MiB (draft: %.3f MiB, spec: %.3f MiB, archive: %.3f MiB)\n",
                 (int) prompt.tokens.size(), cur_size / (1024.0 * 1024.0),
-                cur_size_dft / (1024.0 * 1024.0), cur_size_spec / (1024.0 * 1024.0));
+                cur_size_dft / (1024.0 * 1024.0), cur_size_spec / (1024.0 * 1024.0),
+                cur_size_archive / (1024.0 * 1024.0));
 
-        auto * cur = prompt_cache.alloc(prompt, prompt_cache_key, cur_size_tgt, cur_size_dft, cur_size_spec);
+        auto * cur = prompt_cache.alloc(
+                prompt, prompt_cache_key, cur_size_tgt, cur_size_dft, cur_size_spec, mtp_hidden_archive);
         if (cur == nullptr) {
             return false;
         }
@@ -358,6 +409,7 @@ struct server_slot {
     void prompt_clear() {
         SLT_TRC(*this, "clearing prompt with %zu tokens\n", prompt.tokens.size());
 
+        clear_mtp_archive();
         mem.seq_rm(id, -1, -1);
 
         prompt.clear();
@@ -536,6 +588,7 @@ struct server_slot {
         GGML_ASSERT(can_speculate());
 
         if (!spec_is_replay) {
+            clear_mtp_archive();
             mem.seq_rm(id, -1, -1);
             prompt.clear();
             prompt_cache_key.clear();
@@ -633,6 +686,10 @@ struct server_slot {
 
             if (can_speculate() && !spec_cycle_idle()) {
                 abort_spec_cycle();
+            }
+
+            if (mtp_prefill_mode == SLOT_MTP_PREFILL_DEFERRED) {
+                finalize_mtp_archive();
             }
 
             state = SLOT_STATE_IDLE;
@@ -782,7 +839,10 @@ struct server_slot {
         common_speculative_print_stats(spec);
     }
 
-    json to_json(bool only_metrics = false, bool speculative_policy_active = false) const {
+    json to_json(
+            bool only_metrics = false,
+            bool speculative_policy_active = false,
+            bool mtp_deferred_active = false) const {
         json res;
 
         res = {
@@ -792,7 +852,7 @@ struct server_slot {
             {"is_processing", is_processing()},
         };
 
-        if (speculative_policy_active) {
+        if (speculative_policy_active || mtp_deferred_active) {
             const uint32_t loaded_mask   = common_speculative_loaded_mask(spec);
             const uint32_t eligible_mask = common_speculative_eligible_mask(spec, id);
             const uint32_t stateful_mask = common_speculative_stateful_mask(spec);
@@ -815,6 +875,21 @@ struct server_slot {
             }
             if ((loaded_mask & mtp_mask) != 0) {
                 policy["mtp_ready"] = (synchronized_mask & mtp_mask) != 0;
+            }
+            if (mtp_deferred_active) {
+                policy["mtp_prefill_mode"] = slot_mtp_prefill_mode_to_str(mtp_prefill_mode);
+                policy["mtp_capture_active"] = mtp_capture_active;
+                policy["mtp_backfill_blocked"] = mtp_backfill_blocked;
+                if (mtp_hidden_archive) {
+                    const auto info = common_speculative_hidden_archive_get_info(mtp_hidden_archive);
+                    policy["mtp_hidden_archive"] = {
+                        {"id",             info.id},
+                        {"pos_first",      info.pos_first},
+                        {"pos_end",        info.pos_end},
+                        {"row_count",      info.row_count},
+                        {"retained_bytes", info.retained_bytes},
+                    };
+                }
             }
 
             res["speculative_policy"] = std::move(policy);
@@ -1098,6 +1173,7 @@ private:
     common_speculative_ptr spec;
 
     std::vector<server_speculative_policy_limit> speculative_policy_limits;
+    uint64_t next_mtp_archive_id = 1;
 
     bool add_bos_token = true;
 
@@ -1544,6 +1620,17 @@ private:
         if (!params_base.spec_active_limits.empty()) {
             SRV_INF("speculative active limits: %s\n",
                     speculative_active_limits_to_str(params_base.spec_active_limits).c_str());
+        }
+        if (params_base.spec_mtp_deferred) {
+            if (!spec || !common_speculative_is_loaded(spec.get(), COMMON_SPECULATIVE_TYPE_DRAFT_MTP)) {
+                SRV_ERR("%s", "--spec-mtp-deferred requires a loaded draft-mtp implementation\n");
+                return false;
+            }
+            if (!common_speculative_mtp_deferred_supported(spec.get())) {
+                SRV_ERR("%s", "--spec-mtp-deferred supports separate-memory, single-head MTP only\n");
+                return false;
+            }
+            SRV_INF("%s", "deferred MTP prefill capability enabled\n");
         }
         if (spec && common_speculative_is_loaded(spec.get(), COMMON_SPECULATIVE_TYPE_NGRAM_MOD)) {
             SRV_INF("ngram-mod pool update: %s\n",
@@ -2166,6 +2253,7 @@ private:
         if (prepared.lora_resident == PREPARED_LORA_RESIDENT_CLEAR) {
             SLT_TRC(slot, "clearing cache for lora change. %zu loras -> %zu loras\n",
                     slot.lora.size(), prepared.task->params.lora.size());
+            slot.clear_mtp_archive();
             slot.prompt.clear();
         } else if (prepared.lora_resident == PREPARED_LORA_RESIDENT_KEEP) {
             SLT_TRC(slot, "keeping cache for alora. %zu target loras\n", prepared.lora.size());
@@ -2800,6 +2888,20 @@ private:
                             common_speculative_loaded_mask(spec.get()),
                             speculative_policy_limits);
 
+                    const uint32_t mtp_mask = 1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+                    std::vector<slot_mtp_prefill_mode> mtp_modes(
+                            prepared.size(), SLOT_MTP_PREFILL_TARGET_ONLY);
+                    if (params_base.spec_mtp_deferred) {
+                        for (size_t i = 0; i < prepared.size(); ++i) {
+                            if (!prepared[i].task->is_parent() && !prepared[i].task->is_child() &&
+                                    prepared[i].task->need_sampling()) {
+                                mtp_modes[i] = (policy.incoming_masks[i] & mtp_mask)
+                                    ? SLOT_MTP_PREFILL_IMMEDIATE
+                                    : SLOT_MTP_PREFILL_DEFERRED;
+                            }
+                        }
+                    }
+
                     auto & prepared_parent = prepared.back();
                     auto & parent_slot     = *selection.parent;
 
@@ -2847,11 +2949,31 @@ private:
                         policy.incoming_masks[parent_idx] &= ~common_speculative_stateful_mask(spec.get());
                     }
 
+                    const bool cached_has_archive = cached_prompt && cached_prompt->data.hidden_archive;
+                    const bool resident_has_archive = !cached_prompt && parent_slot.mtp_hidden_archive;
+                    if (mtp_modes[parent_idx] != SLOT_MTP_PREFILL_TARGET_ONLY &&
+                            (cached_has_archive || resident_has_archive)) {
+                        mtp_modes[parent_idx] = SLOT_MTP_PREFILL_DEFERRED;
+                        policy.incoming_masks[parent_idx] &= ~mtp_mask;
+                    }
+
                     std::vector<server_slot *> incoming_slots;
                     incoming_slots.reserve(prepared.size());
                     for (auto & cur : prepared) {
                         incoming_slots.push_back(cur.slot);
                         attach_prepared_slot(std::move(cur));
+                    }
+
+                    for (size_t i = 0; i < incoming_slots.size(); ++i) {
+                        auto & incoming = *incoming_slots[i];
+                        const bool keep_resident_archive =
+                            i == parent_idx && !cached_prompt &&
+                            mtp_modes[i] == SLOT_MTP_PREFILL_DEFERRED;
+                        if (!keep_resident_archive) {
+                            incoming.clear_mtp_archive();
+                        }
+                        incoming.mtp_prefill_mode = mtp_modes[i];
+                        incoming.mtp_backfill_blocked = false;
                     }
 
                     if (spec) {
@@ -2871,9 +2993,12 @@ private:
                     if (cached_prompt) {
                         const uint32_t admitted_draft_mask =
                             policy.incoming_masks[parent_idx] & common_speculative_draft_mask(spec.get());
-                        const auto restore_mode = admitted_draft_mask != 0
-                            ? SERVER_PROMPT_CACHE_RESTORE_WITH_SPEC
-                            : SERVER_PROMPT_CACHE_RESTORE_TARGET_ONLY;
+                        const auto restore_mode = cached_has_archive &&
+                                mtp_modes[parent_idx] == SLOT_MTP_PREFILL_DEFERRED
+                            ? SERVER_PROMPT_CACHE_RESTORE_WITH_ARCHIVE
+                            : admitted_draft_mask != 0
+                                ? SERVER_PROMPT_CACHE_RESTORE_WITH_SPEC
+                                : SERVER_PROMPT_CACHE_RESTORE_TARGET_ONLY;
                         const auto restored = prompt_cache->apply(
                                 std::move(cached_prompt),
                                 restore_mode,
@@ -2885,8 +3010,16 @@ private:
 
                         if (!restored.target) {
                             parent_slot.prompt_clear();
+                            parent_slot.mtp_prefill_mode = mtp_modes[parent_idx];
+                        } else if (restored.hidden_archive) {
+                            parent_slot.mtp_hidden_archive = restored.hidden_archive;
+                            parent_slot.mtp_prefill_mode = SLOT_MTP_PREFILL_DEFERRED;
                         } else if (restored.reason != SERVER_PROMPT_CACHE_RESTORE_REASON_NONE) {
                             parent_slot.request_spec_demote(admitted_draft_mask);
+                            parent_slot.mtp_prefill_mode = SLOT_MTP_PREFILL_TARGET_ONLY;
+                        } else if (restore_mode == SERVER_PROMPT_CACHE_RESTORE_TARGET_ONLY &&
+                                mtp_modes[parent_idx] == SLOT_MTP_PREFILL_DEFERRED) {
+                            parent_slot.mtp_prefill_mode = SLOT_MTP_PREFILL_TARGET_ONLY;
                         }
                     }
 
@@ -2971,7 +3104,8 @@ private:
                     for (server_slot & slot : slots) {
                         json slot_data = slot.to_json(
                                 slots_debug == 0,
-                                !params_base.spec_active_limits.empty());
+                                !params_base.spec_active_limits.empty(),
+                                params_base.spec_mtp_deferred);
 
                         if (slot.is_processing()) {
                             n_processing_slots++;
@@ -3081,6 +3215,11 @@ private:
                     llama_tokens tokens;
                     tokens.resize(slot->n_ctx);
                     size_t token_count = 0;
+                    slot->clear_mtp_archive();
+                    if (ctx_dft != nullptr) {
+                        llama_memory_seq_rm(llama_get_memory(ctx_dft), slot->id, -1, -1);
+                    }
+                    slot->request_spec_demote(common_speculative_stateful_mask(spec.get()));
                     size_t nread = llama_state_seq_load_file(ctx_tgt, filepath.c_str(), slot->id, tokens.data(), tokens.size(), &token_count);
                     if (nread == 0) {
                         slot->prompt.clear(); // KV may already been invalidated?
@@ -3350,6 +3489,39 @@ private:
         }
     }
 
+    void try_activate_deferred_mtp(server_slot & slot) {
+        if (slot.mtp_prefill_mode != SLOT_MTP_PREFILL_DEFERRED ||
+                slot.mtp_backfill_blocked || !slot.spec_cycle_idle()) {
+            return;
+        }
+
+        const size_t active_streams = std::count_if(
+                slots.begin(), slots.end(), [](const server_slot & cur) { return cur.is_processing(); });
+        const uint32_t mtp_mask = 1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+        const uint32_t allowed = server_speculative_allowed_mask(
+                active_streams, common_speculative_loaded_mask(spec.get()), speculative_policy_limits);
+        if ((allowed & mtp_mask) == 0) {
+            return;
+        }
+
+        slot.finalize_mtp_archive();
+        if (!slot.mtp_hidden_archive) {
+            slot.mtp_prefill_mode = SLOT_MTP_PREFILL_TARGET_ONLY;
+            return;
+        }
+
+        if (!common_speculative_mtp_backfill(spec.get(), slot.id, slot.mtp_hidden_archive)) {
+            slot.mtp_backfill_blocked = true;
+            return;
+        }
+
+        const auto info = common_speculative_hidden_archive_get_info(slot.mtp_hidden_archive);
+        SLT_INF(slot, "activated deferred MTP archive=%" PRIu64 " rows=%" PRId64 "\n",
+                info.id, info.row_count);
+        slot.mtp_hidden_archive.reset();
+        slot.mtp_prefill_mode = SLOT_MTP_PREFILL_IMMEDIATE;
+    }
+
     void pre_decode() {
         // apply context-shift if needed
         // TODO: simplify and improve
@@ -3396,6 +3568,7 @@ private:
 
                 SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
 
+                slot.clear_mtp_archive();
                 slot.request_spec_demote(common_speculative_stateful_eligible_mask(spec.get(), slot.id));
                 slot.mem.seq_rm (slot.id, n_keep            , n_keep + n_discard);
                 slot.mem.seq_add(slot.id, n_keep + n_discard, slot.prompt.tokens.pos_next(), -n_discard);
@@ -3417,6 +3590,12 @@ private:
                 }
 
                 slot.truncated = true;
+            }
+        });
+
+        iterate(slots, [&](server_slot & slot) {
+            if (slot.state == SLOT_STATE_GENERATING) {
+                try_activate_deferred_mtp(slot);
             }
         });
 
@@ -3612,7 +3791,7 @@ private:
                         int n_past = 0;
 
                         const int n_resident = slot.prompt.n_tokens();
-                        uint32_t resident_stateful_mask = common_speculative_stateful_eligible_mask(spec.get(), slot.id);
+                        uint32_t resident_stateful_mask = common_speculative_stateful_synchronized_mask(spec.get(), slot.id);
                         bool resident_spec_replaced = false;
 
                         auto demote_resident_spec = [&]() {
@@ -3723,6 +3902,7 @@ private:
 
                                             const int64_t kv_shift = (int64_t) head_p - (int64_t) head_c;
 
+                                            slot.clear_mtp_archive();
                                             demote_resident_spec();
                                             slot.mem.seq_rm (slot.id, head_p, head_c);
                                             slot.mem.seq_add(slot.id, head_c, head_c + n_match, kv_shift);
@@ -3823,6 +4003,7 @@ private:
                                     bool do_reset = it == slot.prompt.checkpoints.rend();
 
                                     if (!do_reset) {
+                                        slot.clear_mtp_archive();
                                         if (it->try_load_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY)) {
                                             pos_next = std::min(pos_next, std::max(it->pos_min + 1, it->pos_max));
                                             n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) it->n_tokens);
@@ -3890,6 +4071,28 @@ private:
                         slot.n_prompt_tokens_processed = 0;
 
                         slot.prompt.tokens.keep_first(n_past);
+
+                        if (slot.mtp_prefill_mode == SLOT_MTP_PREFILL_DEFERRED) {
+                            common_speculative_hidden_archive_ref prefix;
+                            if (n_past > 0 && slot.mtp_hidden_archive) {
+                                const auto info = common_speculative_hidden_archive_get_info(slot.mtp_hidden_archive);
+                                if (info.pos_first == 0 && info.row_count >= n_past) {
+                                    prefix = info.row_count == n_past
+                                        ? slot.mtp_hidden_archive
+                                        : common_speculative_hidden_archive_prefix(
+                                            slot.mtp_hidden_archive, n_past, next_mtp_archive_id++);
+                                }
+                            }
+
+                            if (n_past == 0 || prefix) {
+                                common_speculative_mtp_capture_begin(
+                                        spec.get(), slot.id, next_mtp_archive_id++, n_past, std::move(prefix));
+                                slot.mtp_hidden_archive.reset();
+                                slot.mtp_capture_active = true;
+                            } else {
+                                slot.clear_mtp_archive();
+                            }
+                        }
 
                         // this is to signal the client that the request has started processing
                         if (slot.task->params.stream) {
@@ -4287,6 +4490,7 @@ private:
                 slot.state = SLOT_STATE_GENERATING;
 
                 if (slot.can_speculate()) {
+                    try_activate_deferred_mtp(slot);
                     common_speculative_begin(spec.get(), slot.id, slot.prompt.tokens.get_text_tokens());
                 }
             } else if (slot.state != SLOT_STATE_GENERATING) {
@@ -5143,6 +5347,9 @@ void server_routes::init_routes() {
         }
         if (!params.spec_active_limits.empty()) {
             props["speculative_active_limits"] = speculative_active_limits_to_json(params.spec_active_limits);
+        }
+        if (params.spec_mtp_deferred) {
+            props["speculative_mtp_deferred"] = true;
         }
         if (std::find(
                     params.speculative.types.begin(),

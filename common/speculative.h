@@ -5,6 +5,67 @@
 
 struct common_speculative;
 
+struct common_speculative_hidden_archive;
+struct common_speculative_hidden_archive_builder;
+
+using common_speculative_hidden_archive_ref = std::shared_ptr<const common_speculative_hidden_archive>;
+
+struct common_speculative_hidden_archive_builder_deleter {
+    void operator()(common_speculative_hidden_archive_builder * builder) const;
+};
+
+using common_speculative_hidden_archive_builder_ptr =
+    std::unique_ptr<common_speculative_hidden_archive_builder, common_speculative_hidden_archive_builder_deleter>;
+
+struct common_speculative_hidden_archive_info {
+    uint64_t id = 0;
+    llama_seq_id seq_id = -1;
+    llama_pos pos_first = -1;
+    llama_pos pos_end = -1;
+    int64_t row_count = 0;
+    int32_t n_embd = 0;
+    ggml_type storage_type = GGML_TYPE_F32;
+    size_t retained_bytes = 0;
+};
+
+struct common_speculative_hidden_archive_cursor {
+    size_t block = 0;
+    int32_t offset = 0;
+};
+
+common_speculative_hidden_archive_builder_ptr common_speculative_hidden_archive_builder_init(
+        uint64_t id,
+        llama_seq_id seq_id,
+        int32_t n_embd,
+        ggml_type storage_type,
+        common_speculative_hidden_archive_ref prefix = {});
+
+void common_speculative_hidden_archive_builder_append(
+        common_speculative_hidden_archive_builder * builder,
+        llama_pos pos_first,
+        const llama_token * tokens,
+        const float * rows,
+        int32_t row_count);
+
+common_speculative_hidden_archive_ref common_speculative_hidden_archive_builder_finalize(
+        common_speculative_hidden_archive_builder_ptr builder);
+
+common_speculative_hidden_archive_ref common_speculative_hidden_archive_prefix(
+        common_speculative_hidden_archive_ref archive,
+        int64_t row_count,
+        uint64_t id);
+
+common_speculative_hidden_archive_info common_speculative_hidden_archive_get_info(
+        const common_speculative_hidden_archive_ref & archive);
+
+int32_t common_speculative_hidden_archive_read(
+        const common_speculative_hidden_archive_ref & archive,
+        common_speculative_hidden_archive_cursor & cursor,
+        int32_t max_rows,
+        llama_token * tokens,
+        llama_pos * positions,
+        float * rows);
+
 // comma separated list the provided types
 std::string common_speculative_type_name_str(const std::vector<enum common_speculative_type> & types);
 
@@ -45,9 +106,11 @@ uint32_t common_speculative_eligible_mask(const common_speculative * spec, llama
 uint32_t common_speculative_draft_mask(const common_speculative * spec);
 uint32_t common_speculative_stateful_mask(const common_speculative * spec);
 uint32_t common_speculative_stateful_synchronized_mask(const common_speculative * spec, llama_seq_id seq_id);
+bool common_speculative_mtp_deferred_supported(const common_speculative * spec);
 void common_speculative_disable_mask(common_speculative * spec, llama_seq_id seq_id, uint32_t mask);
 
-// Admission reset is the only operation that can add eligibility.
+// Admission reset restores the admitted mask; successful deferred MTP
+// backfill may add only the MTP bit for that sequence.
 void common_speculative_reset_sequence(common_speculative * spec, llama_seq_id seq_id);
 void common_speculative_reset_sequence(
         common_speculative * spec, llama_seq_id seq_id, uint32_t incoming_mask, bool preserve_stateful);
@@ -77,6 +140,22 @@ common_speculative_draft_params & common_speculative_get_draft_params(common_spe
 
 // optionally call once at the beginning of a new generation
 void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, const llama_tokens & prompt);
+
+// MTP deferred-prefill capture. The server chooses deferred mode and supplies
+// the retained target-prefix boundary; MTP owns the row capture mechanics.
+void common_speculative_mtp_capture_begin(
+        common_speculative * spec,
+        llama_seq_id seq_id,
+        uint64_t archive_id,
+        llama_pos pos_first,
+        common_speculative_hidden_archive_ref prefix = {});
+common_speculative_hidden_archive_ref common_speculative_mtp_capture_finalize(
+        common_speculative * spec, llama_seq_id seq_id, llama_pos pos_end);
+void common_speculative_mtp_capture_discard(common_speculative * spec, llama_seq_id seq_id);
+bool common_speculative_mtp_backfill(
+        common_speculative * spec,
+        llama_seq_id seq_id,
+        const common_speculative_hidden_archive_ref & archive);
 
 // process the batch and update the internal state of the speculative context
 bool common_speculative_process(common_speculative * spec, const llama_batch & batch);

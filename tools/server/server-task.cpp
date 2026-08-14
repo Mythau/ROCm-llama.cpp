@@ -1641,6 +1641,13 @@ json server_task_result_apply_lora::to_json() {
 //
 // server_prompt_cache
 //
+size_t server_prompt_data::size() const {
+    const size_t archive_size = hidden_archive
+        ? common_speculative_hidden_archive_get_info(hidden_archive).retained_bytes
+        : 0;
+    return main.size() + drft.size() + spec.size() + archive_size;
+}
+
 size_t server_prompt_cache::size() const {
     size_t res = 0;
 
@@ -1666,14 +1673,32 @@ server_prompt_cache_state * server_prompt_cache::alloc(
         const std::string & prompt_cache_key,
         size_t state_size_tgt,
         size_t state_size_dft,
-        size_t state_size_spec) {
-    // first check if the current state is contained fully in the cache
+        size_t state_size_spec,
+        std::shared_ptr<const common_speculative_hidden_archive> hidden_archive) {
+    GGML_ASSERT(!hidden_archive || (state_size_dft == 0 && state_size_spec == 0));
+
+    const int incoming_representation = state_size_dft > 0
+        ? 2
+        : hidden_archive ? 1 : 0;
+
+    // Keep the richest representation for an identical prompt: synchronized
+    // draft state, then deferred archive, then target-only.
     for (auto it = states.begin(); it != states.end(); ++it) {
         const int cur_lcp_len = it->prompt.tokens.get_common_prefix(prompt.tokens);
 
         if (cur_lcp_len == (int) prompt.tokens.size()) {
-            SRV_TRC("%s", " - prompt is already in the cache, skipping\n");
-            return nullptr;
+            if (it->prompt.tokens.size() != prompt.tokens.size()) {
+                SRV_TRC("%s", " - prompt is already contained in the cache, skipping\n");
+                return nullptr;
+            }
+            const int cached_representation = !it->data.drft.empty()
+                ? 2
+                : it->data.hidden_archive ? 1 : 0;
+            if (incoming_representation <= cached_representation) {
+                SRV_TRC("%s", " - prompt is already in the cache, skipping\n");
+                return nullptr;
+            }
+            break;
         }
     }
 
@@ -1683,7 +1708,11 @@ server_prompt_cache_state * server_prompt_cache::alloc(
         checkpoints_size += ckpt.size();
     }
 
-    const size_t state_size_new = state_size_tgt + state_size_dft + state_size_spec + checkpoints_size;
+    const size_t archive_size = hidden_archive
+        ? common_speculative_hidden_archive_get_info(hidden_archive).retained_bytes
+        : 0;
+    const size_t state_size_new =
+        state_size_tgt + state_size_dft + state_size_spec + archive_size + checkpoints_size;
 
     // skip over-limit entries to avoid disturbing the cache
     if (limit_size > 0 && state_size_new > limit_size) {
@@ -1744,6 +1773,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(
             /*.main =*/ std::move(state_data_tgt),
             /*.drft =*/ std::move(state_data_dft),
             /*.spec =*/ {},
+            /*.hidden_archive =*/ std::move(hidden_archive),
         },
     });
 
@@ -1852,6 +1882,18 @@ server_prompt_cache_restore_result server_prompt_cache::apply(
         clear_optional();
         return result;
     }
+
+    if (mode == SERVER_PROMPT_CACHE_RESTORE_WITH_ARCHIVE) {
+        clear_optional();
+        if (!state->data.hidden_archive) {
+            result.reason = SERVER_PROMPT_CACHE_RESTORE_REASON_OPTIONAL_MISSING;
+            return result;
+        }
+        result.hidden_archive = std::move(state->data.hidden_archive);
+        return result;
+    }
+
+    GGML_ASSERT(!state->data.hidden_archive);
 
     if (ctx_dft == nullptr || state->data.drft.empty()) {
         clear_optional();

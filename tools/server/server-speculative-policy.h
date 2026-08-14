@@ -24,6 +24,11 @@ struct server_speculative_policy_plan {
     std::vector<server_speculative_policy_removal> removals;
 };
 
+uint32_t server_speculative_allowed_mask(
+    size_t                                               active_stream_count,
+    uint32_t                                             loaded_mask,
+    const std::vector<server_speculative_policy_limit> & limits);
+
 // Pure occupancy policy. Existing streams are never granted eligibility; callers
 // apply the returned removals at the admission transaction's safe point.
 server_speculative_policy_plan server_speculative_plan_occupancy(

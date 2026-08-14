@@ -1358,6 +1358,15 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     std::vector<int>                i_last;
     std::vector<std::vector<float>> chain_h;
 
+    struct hidden_capture {
+        common_speculative_hidden_archive_builder_ptr builder;
+        llama_pos pos_next = -1;
+        llama_pos pending_pos_first = -1;
+        std::vector<llama_token> pending_tokens;
+        std::vector<float> pending_rows;
+    };
+    std::vector<hidden_capture> captures;
+
     common_speculative_impl_draft_mtp(const common_params_speculative & params, uint32_t n_seq)
         : common_speculative_impl(COMMON_SPECULATIVE_TYPE_DRAFT_MTP, n_seq)
         , params(params.draft)
@@ -1437,6 +1446,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         verify_h.assign(n_seq, {});
         verify_h_rows.assign(n_seq, 0);
+        captures.resize(n_seq);
     }
 
     ~common_speculative_impl_draft_mtp() override {
@@ -1476,10 +1486,122 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     }
 
     void reset(llama_seq_id seq_id) override {
+        captures[seq_id] = {};
         invalidate(seq_id);
         std::fill(pending_h[seq_id].begin(), pending_h[seq_id].end(), 0.0f);
         sync[seq_id] = SYNC_UNKNOWN;
         eligible[seq_id] = false;
+    }
+
+    bool capture_active(llama_seq_id seq_id) const {
+        return captures[seq_id].builder != nullptr;
+    }
+
+    bool deferred_supported() const {
+        return !is_mem_shared && !chain_heads;
+    }
+
+    void capture_begin(
+            llama_seq_id seq_id,
+            uint64_t archive_id,
+            llama_pos pos_first,
+            common_speculative_hidden_archive_ref prefix) {
+        GGML_ASSERT(!is_mem_shared && !chain_heads);
+        GGML_ASSERT(pos_first >= 0);
+
+        if (prefix) {
+            const auto info = common_speculative_hidden_archive_get_info(prefix);
+            GGML_ASSERT(info.pos_end + 1 == pos_first);
+            GGML_ASSERT(info.n_embd == n_embd);
+            GGML_ASSERT(info.storage_type == GGML_TYPE_F32);
+        }
+
+        llama_memory_seq_rm(llama_get_memory(params.ctx_dft), seq_id, -1, -1);
+        reset(seq_id);
+
+        captures[seq_id].builder = common_speculative_hidden_archive_builder_init(
+                archive_id, seq_id, n_embd, GGML_TYPE_F32, std::move(prefix));
+        captures[seq_id].pos_next = pos_first;
+    }
+
+    common_speculative_hidden_archive_ref capture_finalize(llama_seq_id seq_id, llama_pos pos_end) {
+        auto & capture = captures[seq_id];
+        GGML_ASSERT(capture.builder != nullptr);
+        if (capture.pos_next != pos_end + 1) {
+            capture = {};
+            return {};
+        }
+
+        auto result = common_speculative_hidden_archive_builder_finalize(std::move(capture.builder));
+        capture = {};
+        return result;
+    }
+
+    void capture_discard(llama_seq_id seq_id) {
+        captures[seq_id] = {};
+    }
+
+    bool backfill(llama_seq_id seq_id, const common_speculative_hidden_archive_ref & archive) {
+        GGML_ASSERT(!is_mem_shared && !chain_heads);
+
+        const auto info = common_speculative_hidden_archive_get_info(archive);
+        GGML_ASSERT(info.pos_first == 0);
+        GGML_ASSERT(info.row_count == info.pos_end + 1);
+        GGML_ASSERT(info.n_embd == n_embd);
+        GGML_ASSERT(info.storage_type == GGML_TYPE_F32);
+
+        auto * ctx_tgt = params.ctx_tgt;
+        auto * ctx_dft = params.ctx_dft;
+        if (llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), seq_id) != info.pos_end) {
+            return false;
+        }
+
+        llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, -1, -1);
+        reset(seq_id);
+
+        const int32_t n_batch = (int32_t) llama_n_batch(ctx_dft);
+        const size_t row_bytes = (size_t) n_embd * sizeof(float);
+        std::vector<llama_token> tokens(n_batch);
+        std::vector<llama_pos> positions(n_batch);
+        std::vector<float> rows((size_t) n_batch * n_embd);
+        std::vector<float> h_previous(n_embd, 0.0f);
+        common_speculative_hidden_archive_cursor cursor;
+
+        int64_t decoded = 0;
+        while (decoded < info.row_count) {
+            const int32_t n_rows = common_speculative_hidden_archive_read(
+                    archive, cursor, n_batch, tokens.data(), positions.data(), rows.data());
+            GGML_ASSERT(n_rows > 0);
+
+            common_batch_clear(batch);
+            for (int32_t i = 0; i < n_rows; ++i) {
+                GGML_ASSERT(positions[i] == decoded + i);
+                common_batch_add(batch, tokens[i], positions[i], { seq_id }, 0);
+                std::memcpy(batch.embd + (size_t) i * n_embd, h_previous.data(), row_bytes);
+                std::memcpy(h_previous.data(), rows.data() + (size_t) i * n_embd, row_bytes);
+            }
+
+            const int32_t rc = llama_decode(ctx_dft, batch);
+            if (rc != 0) {
+                llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, -1, -1);
+                invalidate(seq_id);
+                return false;
+            }
+            decoded += n_rows;
+        }
+
+        if (llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id) != info.pos_end) {
+            llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, -1, -1);
+            invalidate(seq_id);
+            return false;
+        }
+
+        pending_h[seq_id] = std::move(h_previous);
+        verify_h[seq_id].clear();
+        verify_h_rows[seq_id] = 0;
+        sync[seq_id] = SYNC_SYNCHRONIZED;
+        eligible[seq_id] = true;
+        return true;
     }
 
     void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
@@ -1525,6 +1647,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 i_batch_beg[seq_id] = k;
             } else {
                 if (i_batch_end[seq_id] != k - 1 || batch_in.pos[k] != batch_in.pos[k - 1] + 1) {
+                    GGML_ASSERT(!capture_active(seq_id) && "deferred MTP capture requires contiguous per-sequence rows");
                     invalidate(seq_id);
                 }
             }
@@ -1532,7 +1655,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         }
 
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
-            if (i_batch_beg[seq_id] >= 0 && !eligible[seq_id]) {
+            if (i_batch_beg[seq_id] >= 0 && !eligible[seq_id] && !capture_active(seq_id)) {
                 invalidate(seq_id);
             }
         }
@@ -1540,6 +1663,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         // TODO: how to make it work with vision tokens?
         if (batch_in.token == nullptr || batch_in.embd != nullptr) {
             for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+                GGML_ASSERT(i_batch_beg[seq_id] < 0 || !capture_active(seq_id));
                 if (i_batch_beg[seq_id] >= 0 && eligible[seq_id]) {
                     invalidate(seq_id);
                 }
@@ -1552,13 +1676,45 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         const size_t row_bytes = (size_t) n_embd * sizeof(float);
 
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+            if (i_batch_beg[seq_id] < 0 || !capture_active(seq_id)) {
+                continue;
+            }
+
+            auto & capture = captures[seq_id];
+            const int32_t n_rows = i_batch_end[seq_id] - i_batch_beg[seq_id] + 1;
+            GGML_ASSERT(batch_in.pos[i_batch_beg[seq_id]] == capture.pos_next);
+
+            const float * h = llama_get_embeddings_nextn_ith(ctx_tgt, i_batch_beg[seq_id]);
+            GGML_ASSERT(h != nullptr);
+
+            bool verification = n_rows > 1;
+            for (int32_t i = 0; verification && i < n_rows; ++i) {
+                verification = batch_in.logits[i_batch_beg[seq_id] + i] != 0;
+            }
+
+            if (verification) {
+                capture.pending_pos_first = capture.pos_next;
+                capture.pending_tokens.assign(
+                        batch_in.token + i_batch_beg[seq_id],
+                        batch_in.token + i_batch_beg[seq_id] + n_rows);
+                capture.pending_rows.assign(h, h + (size_t) n_rows * n_embd);
+            } else {
+                common_speculative_hidden_archive_builder_append(
+                        capture.builder.get(), capture.pos_next,
+                        batch_in.token + i_batch_beg[seq_id], h, n_rows);
+                capture.pos_next += n_rows;
+            }
+        }
+
         if (!is_mem_shared) {
             common_batch_clear(batch);
             i_batch_dft.assign(n_tokens, -1);
 
             auto * mem_dft = llama_get_memory(ctx_dft);
             for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
-                if (i_batch_beg[seq_id] < 0 || !eligible[seq_id] || sync[seq_id] == SYNC_INVALID) {
+                if (i_batch_beg[seq_id] < 0 || capture_active(seq_id) ||
+                        !eligible[seq_id] || sync[seq_id] == SYNC_INVALID) {
                     continue;
                 }
 
@@ -1570,7 +1726,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
             for (int k = 0; k < n_tokens; ++k) {
                 const llama_seq_id seq_id = batch_in.seq_id[k][0];
-                if (!eligible[seq_id] || sync[seq_id] == SYNC_INVALID) {
+                if (capture_active(seq_id) || !eligible[seq_id] || sync[seq_id] == SYNC_INVALID) {
                     continue;
                 }
 
@@ -1624,7 +1780,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         }
 
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
-            if (i_batch_end[seq_id] < 0 || !eligible[seq_id] || sync[seq_id] == SYNC_INVALID) {
+            if (i_batch_end[seq_id] < 0 || capture_active(seq_id) ||
+                    !eligible[seq_id] || sync[seq_id] == SYNC_INVALID) {
                 continue;
             }
 
@@ -1797,6 +1954,20 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     }
 
     void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
+        if (capture_active(seq_id) && !captures[seq_id].pending_tokens.empty()) {
+            auto & capture = captures[seq_id];
+            const int32_t n_rows = 1 + n_accepted;
+            GGML_ASSERT(n_rows <= (int32_t) capture.pending_tokens.size());
+            common_speculative_hidden_archive_builder_append(
+                    capture.builder.get(), capture.pending_pos_first,
+                    capture.pending_tokens.data(), capture.pending_rows.data(), n_rows);
+            capture.pos_next += n_rows;
+            capture.pending_pos_first = -1;
+            capture.pending_tokens.clear();
+            capture.pending_rows.clear();
+            return;
+        }
+
         if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
             return;
         }
@@ -1934,7 +2105,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             for (int32_t j = 0; j < batch_in.n_seq_id[i]; ++j) {
                 const llama_seq_id seq_id = batch_in.seq_id[i][j];
                 GGML_ASSERT(seq_id >= 0 && seq_id < (llama_seq_id) n_seq);
-                if ((eligible_masks[seq_id] & type_mask) && sync[seq_id] != SYNC_INVALID) {
+                if (capture_active(seq_id) ||
+                        ((eligible_masks[seq_id] & type_mask) && sync[seq_id] != SYNC_INVALID)) {
                     return true;
                 }
             }
@@ -2453,6 +2625,7 @@ struct common_speculative {
 
     // v1 serialization supports one stateful implementation.
     common_speculative_impl * impl_stateful;
+    common_speculative_impl_draft_mtp * impl_mtp;
 
     const uint32_t loaded_mask;
     const uint32_t draft_mask;
@@ -2842,6 +3015,7 @@ common_speculative * common_speculative_init(common_params_speculative & params,
     uint32_t loaded_mask = 0;
     uint32_t draft_mask  = 0;
     common_speculative_impl * impl_stateful = nullptr;
+    common_speculative_impl_draft_mtp * impl_mtp = nullptr;
     for (const auto & impl : impls) {
         const uint32_t impl_mask = 1u << impl->type;
         loaded_mask |= impl_mask;
@@ -2852,6 +3026,9 @@ common_speculative * common_speculative_init(common_params_speculative & params,
             GGML_ASSERT(impl_stateful == nullptr && "v1 speculative serialization supports one stateful implementation");
             impl_stateful = impl.get();
         }
+        if (impl->type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP) {
+            impl_mtp = static_cast<common_speculative_impl_draft_mtp *>(impl.get());
+        }
     }
 
     auto * result = new common_speculative {
@@ -2859,6 +3036,7 @@ common_speculative * common_speculative_init(common_params_speculative & params,
         /* .impls     = */ std::move(impls),
         /* .impl_last = */ std::vector<common_speculative_impl *>(n_seq, nullptr),
         /* .impl_stateful  = */ impl_stateful,
+        /* .impl_mtp       = */ impl_mtp,
         /* .loaded_mask    = */ loaded_mask,
         /* .draft_mask     = */ draft_mask,
         /* .eligible_masks = */ std::vector<uint32_t>(n_seq, loaded_mask),
@@ -2998,6 +3176,43 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
         }
         impl->n_call_begin++;
     }
+}
+
+bool common_speculative_mtp_deferred_supported(const common_speculative * spec) {
+    return spec && spec->impl_mtp && spec->impl_mtp->deferred_supported();
+}
+
+void common_speculative_mtp_capture_begin(
+        common_speculative * spec,
+        llama_seq_id seq_id,
+        uint64_t archive_id,
+        llama_pos pos_first,
+        common_speculative_hidden_archive_ref prefix) {
+    GGML_ASSERT(spec != nullptr && spec->impl_mtp != nullptr);
+    spec->impl_mtp->capture_begin(seq_id, archive_id, pos_first, std::move(prefix));
+}
+
+common_speculative_hidden_archive_ref common_speculative_mtp_capture_finalize(
+        common_speculative * spec, llama_seq_id seq_id, llama_pos pos_end) {
+    GGML_ASSERT(spec != nullptr && spec->impl_mtp != nullptr);
+    return spec->impl_mtp->capture_finalize(seq_id, pos_end);
+}
+
+void common_speculative_mtp_capture_discard(common_speculative * spec, llama_seq_id seq_id) {
+    GGML_ASSERT(spec != nullptr && spec->impl_mtp != nullptr);
+    spec->impl_mtp->capture_discard(seq_id);
+}
+
+bool common_speculative_mtp_backfill(
+        common_speculative * spec,
+        llama_seq_id seq_id,
+        const common_speculative_hidden_archive_ref & archive) {
+    GGML_ASSERT(spec != nullptr && spec->impl_mtp != nullptr);
+    if (!spec->impl_mtp->backfill(seq_id, archive)) {
+        return false;
+    }
+    spec->eligible_masks[seq_id] |= 1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+    return true;
 }
 
 bool common_speculative_process(common_speculative * spec, const llama_batch & batch) {
@@ -3193,7 +3408,9 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, u
 
     // accept with the rest of the implementations, using is_other == true
     for (auto & impl_other : spec->impls) {
-        if (impl_other.get() != impl && common_speculative_is_eligible(spec, seq_id, impl_other->type)) {
+        if (impl_other.get() != impl &&
+                (common_speculative_is_eligible(spec, seq_id, impl_other->type) ||
+                 (impl_other.get() == spec->impl_mtp && spec->impl_mtp->capture_active(seq_id)))) {
             impl_other->accept(seq_id, n_accepted, true);
         }
     }

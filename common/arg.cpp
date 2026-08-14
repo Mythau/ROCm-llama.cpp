@@ -4138,6 +4138,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--spec-mtp-deferred"},
+        "capture target NextN rows in DRAM when startup policy defers MTP, allowing later draft-KV backfill",
+        [](common_params & params) {
+            params.spec_mtp_deferred = true;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--spec-ngram-mod-n-min"}, "N",
         string_format("minimum number of ngram tokens to use for ngram-based speculative decoding (default: %d)", params.speculative.ngram_mod.n_min),
         [](common_params & params, int value) {

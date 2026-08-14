@@ -6,6 +6,7 @@
 #endif
 
 #include <cassert>
+#include <cstring>
 
 static uint32_t type_mask(common_speculative_type type) {
     return 1u << type;
@@ -226,8 +227,93 @@ static void test_speculative_control() {
     assert(common_speculative_eligible_mask(spec.get(), 1) == (simple | map_k));
 }
 
+static void test_hidden_archive() {
+    const llama_token tokens_a[] = { 10, 11, 12 };
+    const float rows_a[] = {
+        10.0f, 10.5f,
+        11.0f, 11.5f,
+        12.0f, 12.5f,
+    };
+    const llama_token tokens_b[] = { 13, 14 };
+    const float rows_b[] = {
+        13.0f, 13.5f,
+        14.0f, 14.5f,
+    };
+
+    auto builder = common_speculative_hidden_archive_builder_init(7, 3, 2, GGML_TYPE_F32);
+    common_speculative_hidden_archive_builder_append(builder.get(), 10, tokens_a, rows_a, 3);
+    common_speculative_hidden_archive_builder_append(builder.get(), 13, tokens_b, rows_b, 2);
+    auto archive = common_speculative_hidden_archive_builder_finalize(std::move(builder));
+
+    const auto info = common_speculative_hidden_archive_get_info(archive);
+    assert(info.id == 7);
+    assert(info.seq_id == 3);
+    assert(info.pos_first == 10);
+    assert(info.pos_end == 14);
+    assert(info.row_count == 5);
+    assert(info.n_embd == 2);
+    assert(info.storage_type == GGML_TYPE_F32);
+    assert(info.retained_bytes >= sizeof(tokens_a) + sizeof(tokens_b) + sizeof(rows_a) + sizeof(rows_b));
+
+    common_speculative_hidden_archive_cursor cursor;
+    llama_token tokens[4];
+    llama_pos positions[4];
+    float rows[8];
+
+    assert(common_speculative_hidden_archive_read(archive, cursor, 4, tokens, positions, rows) == 4);
+    const llama_token expected_tokens[] = { 10, 11, 12, 13 };
+    const llama_pos expected_positions[] = { 10, 11, 12, 13 };
+    const float expected_rows[] = {
+        10.0f, 10.5f,
+        11.0f, 11.5f,
+        12.0f, 12.5f,
+        13.0f, 13.5f,
+    };
+    assert(std::memcmp(tokens, expected_tokens, sizeof(expected_tokens)) == 0);
+    assert(std::memcmp(positions, expected_positions, sizeof(expected_positions)) == 0);
+    assert(std::memcmp(rows, expected_rows, sizeof(expected_rows)) == 0);
+
+    assert(common_speculative_hidden_archive_read(archive, cursor, 4, tokens, positions, rows) == 1);
+    assert(tokens[0] == 14);
+    assert(positions[0] == 14);
+    assert(rows[0] == 14.0f && rows[1] == 14.5f);
+    assert(common_speculative_hidden_archive_read(archive, cursor, 4, tokens, positions, rows) == 0);
+
+    auto prefix = common_speculative_hidden_archive_prefix(archive, 4, 8);
+    const auto prefix_info = common_speculative_hidden_archive_get_info(prefix);
+    assert(prefix_info.id == 8);
+    assert(prefix_info.pos_first == 10);
+    assert(prefix_info.pos_end == 13);
+    assert(prefix_info.row_count == 4);
+
+    const llama_token tokens_c[] = { 14, 15 };
+    const float rows_c[] = {
+        14.0f, 14.5f,
+        15.0f, 15.5f,
+    };
+    // A RAM-cache restore can move the target lineage to another runtime slot.
+    // Old blocks keep their capture provenance; extension blocks use the new
+    // sequence without copying the retained prefix.
+    builder = common_speculative_hidden_archive_builder_init(9, 4, 2, GGML_TYPE_F32, prefix);
+    common_speculative_hidden_archive_builder_append(builder.get(), 14, tokens_c, rows_c, 2);
+    auto extended = common_speculative_hidden_archive_builder_finalize(std::move(builder));
+
+    const auto extended_info = common_speculative_hidden_archive_get_info(extended);
+    assert(extended_info.id == 9);
+    assert(extended_info.seq_id == 4);
+    assert(extended_info.pos_first == 10);
+    assert(extended_info.pos_end == 15);
+    assert(extended_info.row_count == 6);
+
+    // Published archives are immutable values. Extending the sliced prefix does
+    // not alter either source archive.
+    assert(common_speculative_hidden_archive_get_info(archive).row_count == 5);
+    assert(common_speculative_hidden_archive_get_info(prefix).row_count == 4);
+}
+
 int main() {
     test_speculative_control();
+    test_hidden_archive();
     test_ngram_mod_continues_observing_while_disabled();
     test_ngram_mod_observes_initial_prompt_while_disabled();
     test_ngram_mod_eligible_mode_skips_disabled_history();

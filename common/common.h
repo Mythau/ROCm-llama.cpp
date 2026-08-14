@@ -636,6 +636,7 @@ struct common_params {
     int32_t cache_ram_mib       = 8192;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
 
     std::vector<common_params_speculative_active_limit> spec_active_limits;
+    bool spec_mtp_deferred = false;
 
     std::string hostname      = "127.0.0.1";
     std::string public_path   = "";                                                                         // NOLINT
