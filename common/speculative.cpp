@@ -1539,6 +1539,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     common_speculative_hidden_archive_ref capture_finalize(llama_seq_id seq_id, llama_pos pos_end) {
         auto & capture = captures[seq_id];
         GGML_ASSERT(capture.builder != nullptr);
+        if (pos_end < 0) {
+            capture = {};
+            return {};
+        }
         if (capture.pos_next != pos_end + 1) {
             capture = {};
             return {};
