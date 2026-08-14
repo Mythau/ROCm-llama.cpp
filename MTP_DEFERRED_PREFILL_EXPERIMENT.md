@@ -25,7 +25,9 @@ scheduler design.
 - [x] Run ordinary MTP speculation and prove that it generates and accepts drafts.
 - [x] Record target-prefill time, MTP-backfill time, retained-host-buffer size and
   decode throughput separately.
-- [ ] Compare the first MTP draft and acceptance behaviour with immediate MTP.
+- [x] Confirm both immediate and reconstructed MTP produce and accept drafts.
+  Exact acceptance-rate equivalence is model behaviour, not a dynamic-mechanism
+  gate.
 
 ## Archived experimental implementation inventory
 
@@ -486,10 +488,10 @@ plus synchronous MTP backfill averaged 1.682 seconds, equivalent to 4,871
 prompt rows/s. This is 8.47% below the no-spec target-prefill rate, but it is a
 combined pre-generation preparation rate rather than target prefill itself.
 
-For phase separation, the current experiment waits exactly five seconds after
-capture and before MTP backfill. That known delay is excluded from every phase
-number above; client TTFT and the server's combined prompt timer include it and
-must not be reported as prefill throughput.
+For phase separation, the archived spike inserted exactly five seconds around
+the capture/backfill boundary. That diagnostic delay is excluded from every
+phase number above and from the recorded server prompt timing. It is not part of
+the durable implementation and must not be folded into a prefill rate.
 
 The result is useful but still experimental: the retained host copy is cheap,
 NextN production is effectively free once warm, and the roughly 124 ms MTP

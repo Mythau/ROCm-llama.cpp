@@ -486,6 +486,33 @@ with deferred capability enabled never selected deferred mode and is retained
 only as evidence that the dormant capability has no measurable overhead, not as
 an immediate/deferred comparison.
 
+### Final cumulative review
+
+The completed diff was reviewed across all five owners rather than only at the
+call sites. Archive storage remains immutable common-layer data; MTP alone
+interprets and reconstructs hidden rows; the RAM cache stores one opaque shared
+reference and charges its retained allocation; server admission alone chooses
+the mode; and target-lineage mutation sites alone retain, slice or drop it. No
+archive registry, second cache, duplicate scheduler policy or background owner
+was introduced.
+
+The cumulative review found and corrected three concrete boundary cases:
+
+- Releasing a capture before any target row exists now discards the empty
+  builder instead of attempting to publish an empty immutable archive.
+- Parent/child multi-completion groups remove MTP eligibility when deferred
+  capability is enabled, matching their target-only mode and avoiding draft-KV
+  copies without the corresponding hidden boundary.
+- Non-sampling requests likewise remove MTP eligibility, so embedding/rerank
+  work cannot request or process unused NextN rows while reporting target-only.
+
+After those corrections, the CPU Release build completed for
+`test-speculative-control`, `server-context` and `llama-server`; the focused
+control/archive executable passed. The disconnected UI and missing optional
+OpenMP/OpenSSL components remain build-environment warnings, not deferred-MTP
+failures. The unrelated untracked `skills/llamacpp-server-test/` directory was
+not staged or modified by this work.
+
 ## Deferred work
 
 - Leaseable/rotating NextN output buffers and background DRAM copying.

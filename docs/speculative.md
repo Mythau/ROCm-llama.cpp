@@ -220,7 +220,7 @@ The first implementation supports separate target/draft memory with one MTP head
 
 The archive is stored as immutable logical-position blocks whose actual row counts are independent of server batch and microbatch settings. A live archive follows its target prompt/KV lineage. When saved in the RAM prompt cache, the same archive reference is attached without copying its rows and its retained bytes count against the existing prompt-cache limit. Context shifting, non-contiguous reuse, slot-file restore, or another incompatible target-KV replacement discards the archive in this version.
 
-When enabled, `GET /props` reports `speculative_mtp_deferred: true`. `GET /slots` adds the MTP prefill mode, capture/backfill state and finalized archive coverage to `speculative_policy`. This is experimental production integration: CPU archive and compile regressions are covered, while model-backed mixed-slot, cache-restore and performance validation remain required.
+When enabled, `GET /props` reports `speculative_mtp_deferred: true`. `GET /slots` adds the MTP prefill mode, capture/backfill state and finalized archive coverage to `speculative_policy`. CPU archive and compile regressions, mixed-slot isolation, target-only decode-tail activation, RAM-cache restore, lineage fallback and cancellation/replay have been exercised on the supported Q35 path. Capture remains synchronous; backend profiling and asynchronous output-buffer leasing are later performance work.
 
 ## Command-Line Options
 
