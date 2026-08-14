@@ -456,6 +456,10 @@ std::vector<int32_t> & llama_batch_allocr::get_out_ids() {
     return out_ids;
 }
 
+std::vector<int32_t> & llama_batch_allocr::get_ids() {
+    return ids;
+}
+
 llama_pos llama_batch_allocr::seq_pos_min(llama_seq_id seq_id) const {
     return seq_pos[seq_id].empty() ? -1 : *seq_pos[seq_id].begin();
 }
@@ -466,6 +470,7 @@ llama_pos llama_batch_allocr::seq_pos_max(llama_seq_id seq_id) const {
 
 void llama_batch_allocr::split_reset() {
     out_ids.clear();
+    ids.clear();
 
     n_used = 0;
 
@@ -770,6 +775,8 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
     seq_set_t seq_set_unq;
 
     for (size_t i = 0; i < idxs.size(); ++i) {
+        ids.push_back(idxs[i]);
+
         if (batch.token) {
             udata->token[i] = batch.token[idxs[i]];
         }

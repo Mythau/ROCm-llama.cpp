@@ -1725,6 +1725,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
     n_queued_tokens += n_tokens_all;
 
     output_swaps.clear();
+    nextn_swaps.clear();
 
     sched_reserve();
 
@@ -1971,6 +1972,21 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     // set to total number of outputs in the batch, for use in llama_get_logits_ith
     n_outputs = n_outputs_all;
+
+    // Unmasked NextN rows are copied in internal ubatch execution order. Restore
+    // the raw logical-batch order expected by llama_get_embeddings_nextn[_ith].
+    if (cparams.embeddings_nextn && !cparams.embeddings_nextn_masked && n_tokens_all > 1) {
+        auto & ids = balloc->get_ids();
+        GGML_ASSERT(ids.size() == n_tokens_all);
+
+        for (uint32_t i = 0; i < n_tokens_all; ++i) {
+            while (ids[i] != (int32_t) i) {
+                const uint32_t j = ids[i];
+                std::swap(ids[i], ids[j]);
+                nextn_swaps.push_back({ i, j });
+            }
+        }
+    }
 
     // set output mappings
     if (n_outputs > 0) {
@@ -2240,7 +2256,7 @@ void llama_context::output_reorder() {
             }
         }
 
-        if (embd_nextn.size > 0) {
+        if (embd_nextn.size > 0 && cparams.embeddings_nextn_masked) {
             for (uint64_t k = 0; k < n_embd_out; k++) {
                 std::swap(embd_nextn.data[i0*n_embd_out + k], embd_nextn.data[i1*n_embd_out + k]);
             }
@@ -2284,7 +2300,16 @@ void llama_context::output_reorder() {
         }
     }
 
+    for (const auto & swap : nextn_swaps) {
+        for (uint64_t k = 0; k < n_embd_out; ++k) {
+            std::swap(
+                    embd_nextn.data[swap.i0*n_embd_out + k],
+                    embd_nextn.data[swap.i1*n_embd_out + k]);
+        }
+    }
+
     output_swaps.clear();
+    nextn_swaps.clear();
 }
 
 //

@@ -389,6 +389,29 @@ static void test_split(testing & t) {
         t.assert_equal(6u, ba.get_n_used());
     });
 
+    t.test("split_equal_raw_index_order", [&](testing & t) {
+        batch_builder bb;
+        for (int i = 0; i < 4; ++i) {
+            bb.add(i, {0}, i == 3);
+        }
+        for (int i = 0; i < 2; ++i) {
+            bb.add(i, {1}, i == 1);
+        }
+
+        llama_batch_allocr ba(1);
+        t.assert_true(ba.init(bb.make(), vocab, nullptr, bb.n_embd, 4, false));
+
+        while (ba.split_equal(8, false, 0).n_tokens > 0) {
+        }
+
+        const auto & ids = ba.get_ids();
+        const int32_t expected[] = { 0, 1, 4, 5, 2, 3 };
+        t.assert_equal(std::size(expected), ids.size());
+        for (size_t i = 0; i < ids.size(); ++i) {
+            t.assert_equal(expected[i], ids[i]);
+        }
+    });
+
     t.test("split_equal_coupled", [&](testing & t) {
         batch_builder bb;
         bb.add(0, {0, 1}, false);

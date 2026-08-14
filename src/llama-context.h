@@ -340,6 +340,7 @@ private:
     };
 
     std::vector<swap_info> output_swaps;
+    std::vector<swap_info> nextn_swaps;
 
     ggml_backend_sched_ptr sched;
 
