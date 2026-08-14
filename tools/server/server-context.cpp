@@ -1161,6 +1161,7 @@ private:
     llama_context * ctx_tgt = nullptr;
 
     server_batch batch;
+    std::vector<uint8_t> speculative_verification;
 
     llama_model   * model_dft = nullptr;
     llama_context * ctx_dft   = nullptr;
@@ -4401,7 +4402,12 @@ private:
         // TODO: avoid restoring the draft context and re-evaluating the drafted tokens when not needed [TAG_SPEC_AVOID_DRAFT_REEVAL]
         //       for now, always re-evaluate for simplicity
         //       ref: https://github.com/ggml-org/llama.cpp/pull/22728#issuecomment-4400925384
-        if (!common_speculative_process(spec.get(), batch_view)) {
+        speculative_verification.assign(slots.size(), 0);
+        for (const auto & slot : slots) {
+            speculative_verification[slot.id] = !slot.spec_i_batch.empty();
+        }
+
+        if (!common_speculative_process(spec.get(), batch_view, speculative_verification)) {
             SRV_ERR("%s", "failed to process speculative batch\n");
 
             // TODO: handle error

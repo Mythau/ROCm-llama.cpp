@@ -159,6 +159,10 @@ bool common_speculative_mtp_backfill(
 
 // process the batch and update the internal state of the speculative context
 bool common_speculative_process(common_speculative * spec, const llama_batch & batch);
+bool common_speculative_process(
+        common_speculative * spec,
+        const llama_batch & batch,
+        const std::vector<uint8_t> & speculative_verification);
 
 // true if any implementation requires target post-norm embeddings to be extracted
 bool common_speculative_need_embd(common_speculative * spec);

@@ -164,7 +164,10 @@ struct common_speculative_impl {
     virtual bool begin_when_ineligible() const { return false; }
     virtual void begin_ineligible(llama_seq_id seq_id, const llama_tokens & prompt) { begin(seq_id, prompt); }
 
-    virtual bool process(const llama_batch & batch, const std::vector<uint32_t> & eligible_masks) = 0;
+    virtual bool process(
+            const llama_batch & batch,
+            const std::vector<uint32_t> & eligible_masks,
+            const std::vector<uint8_t> & speculative_verification) = 0;
 
     virtual void reset(llama_seq_id /*seq_id*/) {}
 
@@ -273,7 +276,10 @@ struct common_speculative_impl_draft_simple : public common_speculative_impl {
         // noop
     }
 
-    bool process(const llama_batch & batch, const std::vector<uint32_t> & /*eligible_masks*/) override {
+    bool process(
+            const llama_batch & batch,
+            const std::vector<uint32_t> & /*eligible_masks*/,
+            const std::vector<uint8_t> & /*speculative_verification*/) override {
         auto * ctx_dft = params.ctx_dft;
 
         llama_batch batch_dft = batch;
@@ -588,7 +594,10 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
         }
     }
 
-    bool process(const llama_batch & batch_in, const std::vector<uint32_t> & /*eligible_masks*/) override {
+    bool process(
+            const llama_batch & batch_in,
+            const std::vector<uint32_t> & /*eligible_masks*/,
+            const std::vector<uint8_t> & /*speculative_verification*/) override {
         if (batch_in.n_tokens <= 0) {
             return true;
         }
@@ -1086,7 +1095,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         }
     }
 
-    bool process(const llama_batch & batch_in, const std::vector<uint32_t> & /*eligible_masks*/) override {
+    bool process(
+            const llama_batch & batch_in,
+            const std::vector<uint32_t> & /*eligible_masks*/,
+            const std::vector<uint8_t> & /*speculative_verification*/) override {
         if (batch_in.n_tokens <= 0) {
             return true;
         }
@@ -1623,7 +1635,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         }
     }
 
-    bool process(const llama_batch & batch_in, const std::vector<uint32_t> & eligible_masks) override {
+    bool process(
+            const llama_batch & batch_in,
+            const std::vector<uint32_t> & eligible_masks,
+            const std::vector<uint8_t> & speculative_verification) override {
         if (batch_in.n_tokens <= 0) {
             return true;
         }
@@ -1688,12 +1703,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             const float * h = llama_get_embeddings_nextn_ith(ctx_tgt, i_batch_beg[seq_id]);
             GGML_ASSERT(h != nullptr);
 
-            bool verification = n_rows > 1;
-            for (int32_t i = 0; verification && i < n_rows; ++i) {
-                verification = batch_in.logits[i_batch_beg[seq_id] + i] != 0;
-            }
-
-            if (verification) {
+            if (speculative_verification[seq_id]) {
                 capture.pending_pos_first = capture.pos_next;
                 capture.pending_tokens.assign(
                         batch_in.token + i_batch_beg[seq_id],
@@ -2139,7 +2149,10 @@ struct common_speculative_impl_ngram_simple : public common_speculative_impl {
         // noop
     }
 
-    bool process(const llama_batch & /*batch*/, const std::vector<uint32_t> & /*eligible_masks*/) override {
+    bool process(
+            const llama_batch & /*batch*/,
+            const std::vector<uint32_t> & /*eligible_masks*/,
+            const std::vector<uint8_t> & /*speculative_verification*/) override {
         // TODO: implement
         return true;
     }
@@ -2191,7 +2204,10 @@ struct common_speculative_impl_ngram_map_k : public common_speculative_impl {
         common_ngram_map_begin(config[seq_id], prompt);
     }
 
-    bool process(const llama_batch & /*batch*/, const std::vector<uint32_t> & /*eligible_masks*/) override {
+    bool process(
+            const llama_batch & /*batch*/,
+            const std::vector<uint32_t> & /*eligible_masks*/,
+            const std::vector<uint8_t> & /*speculative_verification*/) override {
         // TODO: implement
         return true;
     }
@@ -2421,7 +2437,10 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
         sinfo.n_draft_last = result.size();
     }
 
-    bool process(const llama_batch & /*batch*/, const std::vector<uint32_t> & /*eligible_masks*/) override {
+    bool process(
+            const llama_batch & /*batch*/,
+            const std::vector<uint32_t> & /*eligible_masks*/,
+            const std::vector<uint8_t> & /*speculative_verification*/) override {
         // TODO: implement
         return true;
     }
@@ -2587,7 +2606,10 @@ struct common_speculative_impl_ngram_cache : public common_speculative_impl {
         }
     }
 
-    bool process(const llama_batch & /*batch*/, const std::vector<uint32_t> & /*eligible_masks*/) override {
+    bool process(
+            const llama_batch & /*batch*/,
+            const std::vector<uint32_t> & /*eligible_masks*/,
+            const std::vector<uint8_t> & /*speculative_verification*/) override {
         // TODO: implement
         return true;
     }
@@ -3216,14 +3238,28 @@ bool common_speculative_mtp_backfill(
 }
 
 bool common_speculative_process(common_speculative * spec, const llama_batch & batch) {
+    if (spec == nullptr) {
+        return true;
+    }
+
+    return common_speculative_process(
+            spec, batch, std::vector<uint8_t>(spec->eligible_masks.size(), 0));
+}
+
+bool common_speculative_process(
+        common_speculative * spec,
+        const llama_batch & batch,
+        const std::vector<uint8_t> & speculative_verification) {
     bool result = true;
 
     if (spec == nullptr) {
         return result;
     }
 
+    GGML_ASSERT(speculative_verification.size() == spec->eligible_masks.size());
+
     for (auto & impl : spec->impls) {
-        result = result && impl->process(batch, spec->eligible_masks);
+        result = result && impl->process(batch, spec->eligible_masks, speculative_verification);
     }
 
     return result;

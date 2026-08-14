@@ -253,7 +253,9 @@ and no dependence on configured batch geometry.
 Implemented in the MTP process boundary. Active captures request exact-view
 NextN rows, partition grouped mixed views by sequence, append their actual
 logical spans and exclude those sequences from immediate draft-context work.
-CPU compile/regression surfaces pass; model-backed execution remains in DP-07.
+Speculative verification is classified explicitly by server cycle state per
+sequence; MTP no longer guesses from target row count or logits flags. CPU
+compile/regression surfaces pass; model-backed execution remains in DP-07.
 
 ## DP-03 - explicit MTP backfill
 
@@ -411,6 +413,13 @@ live prompt rows, then backfilled and became MTP ready at the current generating
 boundary. The remaining response completed all 256 requested tokens and used
 ordinary MTP drafting (123 proposed, 87 accepted), proving that target-only
 decode rows after prompt completion were included in synchronization.
+
+The explicit verification contract was then exercised with n-gram still active
+while MTP was deferred. A 2,524-row request reached 2,585 live rows while
+n-gram verification was occurring, synchronized at 2,589 and completed all 128
+requested tokens (67 speculative proposals, 42 accepted). Exact archive/target
+position agreement at backfill proves that only the accepted verification
+prefix was published; rejected candidate rows were not retained.
 
 ## Deferred work
 
