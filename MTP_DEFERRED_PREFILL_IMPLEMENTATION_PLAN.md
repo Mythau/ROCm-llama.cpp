@@ -379,8 +379,8 @@ GPU validation then proceeds in increasing cost:
 1. Fresh single-slot capture/backfill reproduces the archived spike's coherent
    512-token result and ordinary MTP drafts.
 2. [Complete] Mixed target views publish separate contiguous archives.
-3. A deferred request remains coherent while target-only decode appends rows,
-   then activates MTP at the exact current boundary.
+3. [Complete] A deferred request remains coherent while target-only decode
+   appends rows, then activates MTP at the exact current boundary.
 4. RAM-cache save/evict/restore preserves target reuse and deferred archive
    identity without hidden-row copying.
 5. Immediate MTP, deferred MTP and target-only controls show the expected work
@@ -403,6 +403,14 @@ retained 37,365,900 bytes. Each resident archive then restored the complete
 4,559-row target prefix on its own slot, backfilled independently, became MTP
 ready and produced ordinary MTP drafts (61/42 and 55/44 proposed/accepted).
 Neither continuation contained the other slot's sentinel.
+
+The decode-tail check admitted a second request after the first request was
+already active, fixing its prefill selection as deferred. Its target prompt
+contained 2,755 rows. It remained deferred with capture active through 2,881
+live prompt rows, then backfilled and became MTP ready at the current generating
+boundary. The remaining response completed all 256 requested tokens and used
+ordinary MTP drafting (123 proposed, 87 accepted), proving that target-only
+decode rows after prompt completion were included in synchronization.
 
 ## Deferred work
 
