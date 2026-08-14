@@ -1663,6 +1663,7 @@ size_t server_prompt_cache::n_tokens() const {
 
 server_prompt_cache_state * server_prompt_cache::alloc(
         const server_prompt & prompt,
+        const std::string & prompt_cache_key,
         size_t state_size_tgt,
         size_t state_size_dft,
         size_t state_size_spec) {
@@ -1738,6 +1739,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(
             /*.tokens      =*/ prompt.tokens.clone(),
             /*.checkpoints =*/ prompt.checkpoints,
         },
+        /*.prompt_cache_key =*/ prompt_cache_key,
         /*.data   =*/ {
             /*.main =*/ std::move(state_data_tgt),
             /*.drft =*/ std::move(state_data_dft),
@@ -1750,40 +1752,61 @@ server_prompt_cache_state * server_prompt_cache::alloc(
 
 std::unique_ptr<server_prompt_cache_state> server_prompt_cache::take(
         const server_prompt & prompt,
-        const server_tokens & tokens_new) {
+        const server_tokens & tokens_new,
+        const std::string & prompt_cache_key) {
     const int lcp_best = prompt.tokens.get_common_prefix(tokens_new);
 
-    float f_keep_best = prompt.tokens.size() > 0 ? float(lcp_best) / prompt.tokens.size() : -1.0f;
-    float f_sim_best  = float(lcp_best) / tokens_new.size();
+    const float f_keep_base = prompt.tokens.size() > 0 ? float(lcp_best) / prompt.tokens.size() : -1.0f;
+    const float f_sim_base  = float(lcp_best) / tokens_new.size();
 
-    SRV_TRC(" - looking for better prompt, base f_keep = %.3f, f_sim = %.3f\n", f_keep_best, f_sim_best);
+    SRV_TRC(" - looking for better prompt, base f_keep = %.3f, f_sim = %.3f\n", f_keep_base, f_sim_base);
+
+    auto find_best = [&](bool matching_key_only) {
+        float f_keep_best = f_keep_base;
+        float f_sim_best  = f_sim_base;
+        auto it_best = states.end();
+
+        for (auto it = states.begin(); it != states.end(); ++it) {
+            if (matching_key_only && it->prompt_cache_key != prompt_cache_key) {
+                continue;
+            }
+
+            const int lcp_cur = it->prompt.tokens.get_common_prefix(tokens_new);
+
+            const float f_keep_cur = float(lcp_cur) / it->prompt.tokens.size();
+            const float f_sim_cur  = float(lcp_cur) / tokens_new.size();
+
+            SRV_TRC("   - prompt with length %7zu, lcp = %7d, f_keep = %.3f, f_sim = %.3f\n", it->prompt.tokens.size(), lcp_cur, f_keep_cur, f_sim_cur);
+
+            if (f_keep_cur < 0.25f) {
+                continue;
+            }
+
+            if (f_keep_best < f_keep_cur && f_sim_best < f_sim_cur) {
+                f_keep_best = f_keep_cur;
+                f_sim_best  = f_sim_cur;
+                it_best = it;
+            }
+        }
+
+        return it_best;
+    };
 
     auto it_best = states.end();
-
-    for (auto it = states.begin(); it != states.end(); ++it) {
-        const int lcp_cur = it->prompt.tokens.get_common_prefix(tokens_new);
-
-        const float f_keep_cur = float(lcp_cur) / it->prompt.tokens.size();
-        const float f_sim_cur  = float(lcp_cur) / tokens_new.size();
-
-        SRV_TRC("   - prompt with length %7zu, lcp = %7d, f_keep = %.3f, f_sim = %.3f\n", it->prompt.tokens.size(), lcp_cur, f_keep_cur, f_sim_cur);
-
-        if (f_keep_cur < 0.25f) {
-            continue;
-        }
-
-        if (f_keep_best < f_keep_cur && f_sim_best < f_sim_cur) {
-            f_keep_best = f_keep_cur;
-            f_sim_best  = f_sim_cur;
-            it_best = it;
-        }
+    if (!prompt_cache_key.empty()) {
+        it_best = find_best(true);
+    }
+    if (it_best == states.end()) {
+        it_best = find_best(false);
     }
 
     if (it_best == states.end()) {
         return nullptr;
     }
 
-    SRV_TRC(" - found better prompt with f_keep = %.3f, f_sim = %.3f\n", f_keep_best, f_sim_best);
+    const int lcp_found = it_best->prompt.tokens.get_common_prefix(tokens_new);
+    SRV_TRC(" - found better prompt with f_keep = %.3f, f_sim = %.3f\n",
+            float(lcp_found) / it_best->prompt.tokens.size(), float(lcp_found) / tokens_new.size());
 
     auto result = std::make_unique<server_prompt_cache_state>(std::move(*it_best));
     states.erase(it_best);

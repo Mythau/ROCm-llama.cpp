@@ -307,6 +307,7 @@ struct server_slot {
     slot_state state = SLOT_STATE_IDLE;
 
     server_prompt prompt;
+    std::string prompt_cache_key;
 
     bool prompt_save(server_prompt_cache & prompt_cache) const {
         if (prompt.tokens.size() == 0) {
@@ -329,7 +330,7 @@ struct server_slot {
                 (int) prompt.tokens.size(), cur_size / (1024.0 * 1024.0),
                 cur_size_dft / (1024.0 * 1024.0), cur_size_spec / (1024.0 * 1024.0));
 
-        auto * cur = prompt_cache.alloc(prompt, cur_size_tgt, cur_size_dft, cur_size_spec);
+        auto * cur = prompt_cache.alloc(prompt, prompt_cache_key, cur_size_tgt, cur_size_dft, cur_size_spec);
         if (cur == nullptr) {
             return false;
         }
@@ -537,6 +538,7 @@ struct server_slot {
         if (!spec_is_replay) {
             mem.seq_rm(id, -1, -1);
             prompt.clear();
+            prompt_cache_key.clear();
         }
 
         if (common_speculative_cycle_active(spec, id)) {
@@ -638,6 +640,7 @@ struct server_slot {
             // do not keep context of the child slots - the parent's context is enough
             if (task->is_child()) {
                 prompt_clear();
+                prompt_cache_key.clear();
             }
 
             reset();
@@ -1823,8 +1826,35 @@ private:
             }
         }
 
+        // Prefer the resident state associated with this OpenAI cache-affinity key.
+        // The actual token prefix is still reconciled before any KV state is reused.
+        if (ret == nullptr && task.params.cache_prompt && !task.params.prompt_cache_key.empty()) {
+            int lcp_best = -1;
+
+            for (server_slot & slot : slots) {
+                if (slot.is_processing() || slot.prompt.tokens.empty()) {
+                    continue;
+                }
+                if (slot.prompt_cache_key != task.params.prompt_cache_key) {
+                    continue;
+                }
+
+                const int lcp_cur = slot.prompt.tokens.get_common_prefix(task.tokens);
+                if (lcp_cur > lcp_best) {
+                    lcp_best = lcp_cur;
+                    ret = &slot;
+                }
+            }
+
+            if (ret != nullptr) {
+                const float f_keep = float(lcp_best) / ret->prompt.tokens.size();
+                update_cache = f_keep < 0.5f;
+                SLT_INF(*ret, "selected slot by prompt cache key, lcp = %d, f_keep = %.3f\n", lcp_best, f_keep);
+            }
+        }
+
         // find the slot that has at least n% prompt similarity
-        if (slot_prompt_similarity != 0.0f) {
+        if ((ret == nullptr || task.id_slot != -1) && slot_prompt_similarity != 0.0f) {
             float f_sim_best = 0;
 
             for (server_slot & slot : slots) {
@@ -1966,6 +1996,7 @@ private:
                 SRV_WRN("purging slot %d with %zu tokens\n", slot.id, slot.prompt.tokens.size());
 
                 slot.prompt_clear();
+                slot.prompt_cache_key.clear();
 
                 res = true;
 
@@ -2155,6 +2186,7 @@ private:
 
         slot.task  = std::move(prepared.task);
         slot.state = prepared.state;
+        slot.prompt_cache_key = slot.task->params.prompt_cache_key;
 
         // reset server kill-switch counter
         n_empty_consecutive = 0;
@@ -2776,7 +2808,13 @@ private:
                         parent_slot.prompt_save(*prompt_cache);
 
                         if (prepared_parent.lora_resident != PREPARED_LORA_RESIDENT_CLEAR) {
-                            cached_prompt = prompt_cache->take(parent_slot.prompt, prepared_parent.task->tokens);
+                            const std::string prompt_cache_key = prepared_parent.task->params.cache_prompt
+                                ? prepared_parent.task->params.prompt_cache_key
+                                : std::string();
+                            cached_prompt = prompt_cache->take(
+                                    parent_slot.prompt,
+                                    prepared_parent.task->tokens,
+                                    prompt_cache_key);
                         }
                     }
 
@@ -2866,6 +2904,7 @@ private:
                                 if (params_base.kv_unified) {
                                     // [TAG_IDLE_SLOT_CLEAR]
                                     slot.prompt_clear();
+                                    slot.prompt_cache_key.clear();
                                 }
                             }
                         }
@@ -3033,6 +3072,8 @@ private:
                     std::string filename = task.slot_action.filename;
                     std::string filepath = task.slot_action.filepath;
 
+                    slot->prompt_cache_key.clear();
+
                     llama_tokens tokens;
                     tokens.resize(slot->n_ctx);
                     size_t token_count = 0;
@@ -3082,6 +3123,7 @@ private:
                     const size_t n_erased = slot->prompt.tokens.size();
 
                     slot->prompt_clear();
+                    slot->prompt_cache_key.clear();
 
                     auto res = std::make_unique<server_task_result_slot_erase>();
                     res->id       = task.id;
@@ -4130,6 +4172,7 @@ private:
                             // note: it's complicated to keep track of how much of the current batch has been
                             //       processed before the error occurred, so we simply clear the entire context
                             slot.prompt_clear();
+                            slot.prompt_cache_key.clear();
                         }
                     }
 

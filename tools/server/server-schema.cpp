@@ -31,6 +31,12 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
     add((new field_bool("cache_prompt", params.cache_prompt))
         ->set_desc("Re-use KV cache from a previous request if possible. This way the common prefix does not have to be re-processed, only the suffix that differs between the requests"));
 
+    add((new field_str("prompt_cache_key"))
+        ->set_desc("Soft affinity key for resident-slot and RAM prompt-cache selection")
+        ->set_handler([&](field_eval_context & ctx, const json & data) {
+            ctx.params.prompt_cache_key = data.at("prompt_cache_key").get<std::string>();
+        }));
+
     add((new field_bool("return_tokens", params.return_tokens))
         ->set_desc("Return the raw generated token ids in the `tokens` field"));
 

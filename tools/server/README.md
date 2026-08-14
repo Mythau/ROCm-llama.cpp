@@ -1175,6 +1175,25 @@ To know the `id` of the adapter, use GET `/lora-adapters`
 
 ## OpenAI-compatible API Endpoints
 
+### Prompt-cache affinity
+
+`POST /v1/chat/completions` and `POST /v1/responses` accept the OpenAI
+`prompt_cache_key` string. When prompt caching is enabled, llama-server uses a
+non-empty key as soft affinity for an idle resident slot or a saved RAM prompt
+cache entry. The key is not a physical slot ID, does not reserve a slot, and
+does not prove that a cache hit exists. The tokenized prompt's actual common
+prefix remains the authority for KV-cache reuse.
+
+Clients should send a stable conversation or user/session identifier, continue
+to send the full conversation or prompt on every request, and leave
+`cache_prompt` enabled. A missing or empty key preserves the existing
+prefix-similarity and LRU behaviour. Concurrent requests with the same key may
+use different free slots.
+
+`X-Conversation-Id` remains separate: it identifies resumable HTTP streams and
+does not select prompt-cache state. Explicit cache breakpoints,
+`prompt_cache_options`, and TTL controls are not implemented.
+
 ### GET `/v1/models`: OpenAI-compatible Model Info API
 
 Returns information about the loaded model. See [OpenAI Models API documentation](https://platform.openai.com/docs/api-reference/models).

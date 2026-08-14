@@ -56,6 +56,8 @@ struct task_params {
     bool return_tokens   = false;
     bool return_progress = false;
 
+    std::string prompt_cache_key;
+
     int32_t sse_ping_interval = 30; // seconds between SSE comment pings while the stream stays silent, -1 disables
 
     int32_t n_keep    =  0; // number of tokens to keep from initial prompt
@@ -625,6 +627,7 @@ struct server_prompt_data {
 
 struct server_prompt_cache_state {
     server_prompt prompt;
+    std::string prompt_cache_key;
     server_prompt_data data;
 
     size_t size() const {
@@ -680,13 +683,15 @@ struct server_prompt_cache {
 
     server_prompt_cache_state * alloc(
             const server_prompt & prompt,
+            const std::string & prompt_cache_key,
             size_t state_size_main,
             size_t state_size_drft,
             size_t state_size_spec);
 
     std::unique_ptr<server_prompt_cache_state> take(
             const server_prompt & prompt,
-            const server_tokens & tokens_new);
+            const server_tokens & tokens_new,
+            const std::string & prompt_cache_key);
 
     server_prompt_cache_restore_result apply(
             std::unique_ptr<server_prompt_cache_state> state,

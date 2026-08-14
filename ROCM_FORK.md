@@ -44,7 +44,8 @@ they can be reviewed or cherry-picked independently. The main groups are:
 - multi-stream correctness and overlap changes;
 - a unified-KV prompt-cache restore fix that prefers contiguous destination
   cells before falling back to scattered placement;
-- occupancy-driven per-request MTP/ngram admission for multi-slot servers.
+- occupancy-driven per-request MTP/ngram admission for multi-slot servers;
+- OpenAI `prompt_cache_key` soft affinity for resident and RAM prompt caches.
 
 Every custom code commit is listed in [`PATCHES.md`](PATCHES.md) with explicit
 provenance and applicability labels. The labels distinguish official llama.cpp
@@ -142,6 +143,27 @@ llama.cpp-side scheduler using caller identifiers is the current preferred
 direction, but the choice between internal scheduling and an external routing
 layer remains open.
 
+## OpenAI prompt-cache affinity
+
+The OpenAI-compatible Chat Completions and Responses routes accept
+`prompt_cache_key` and use it as soft affinity for existing resident or RAM
+prompt-cache state. The tokenized common prefix remains authoritative, and a
+busy matching slot does not block another free slot from serving the request.
+
+The connection and concurrent streaming work with OpenCode 1.18.18. Direct API
+tests also confirm keyed resident reuse and five-request queuing on a four-slot
+server. This feature has not yet been thoroughly validated across other clients,
+models or cache layouts. See
+[`OPENAI_PROMPT_CACHE_AFFINITY_PATCH_NOTES.md`](OPENAI_PROMPT_CACHE_AFFINITY_PATCH_NOTES.md)
+for the exact behaviour, validation and limitations.
+
+The tested invocation is localhost-only and has no API key configured. The
+affinity key is routing metadata, not authentication. This fork adds no key
+issuance, rotation, revocation or caller-identity system; the maintainer does
+not claim the security expertise required to design or audit such a system
+safely. Upstream llama-server's static API-key options remain available but were
+not evaluated as part of this patch.
+
 ## Important limitations
 
 - The branch is intentionally experimental and may diverge from upstream.
@@ -155,6 +177,8 @@ layer remains open.
   arbitrary rewind or model-draft implementation is supported.
 - Occupancy-driven per-request speculative admission is implemented; a broader
   multi-agent/job scheduler is not.
+- The documented server invocation has no configured authentication and should
+  remain limited to a trusted local environment.
 - No binaries, model files, benchmark dumps, or ROCm runtime redistributables are
   included by this documentation commit.
 
