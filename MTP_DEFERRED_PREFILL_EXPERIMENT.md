@@ -99,8 +99,10 @@ partitions completed target views by sequence; explicit backfill reconstructs
 draft KV using its own batch geometry; the RAM prompt cache retains the same
 archive reference and charges its bytes; and the server integrates selection,
 prefix reuse, activation and target-lineage invalidation. CPU archive and server
-compile regressions pass. Model-backed mixed-slot, cache-restore and performance
-validation remains outstanding.
+compile regressions pass. Model-backed mixed-slot isolation, decode-tail
+activation, RAM-cache restore, lineage mutation, cancellation/replay and
+backfill success have also been exercised. The remaining performance work is
+optimization and backend profiling rather than a missing correctness mechanism.
 
 The first durable version remains synchronous and deliberately excludes:
 
@@ -493,3 +495,43 @@ The result is useful but still experimental: the retained host copy is cheap,
 NextN production is effectively free once warm, and the roughly 124 ms MTP
 backfill is the main remaining synchronous cost. The five-second delay is a
 diagnostic separator, not a proposed production behaviour.
+
+### Timing attribution
+
+The server prompt timer begins when a slot enters prompt processing and is
+finalized when sampling synchronizes the first generated token. Immediate MTP
+processing runs after each target decode view and before that first sample, so
+it is included in `timings.prompt_ms`.
+
+Deferred activation has two timing cases:
+
+- If demand permits activation when the prompt reaches `DONE_PROMPT`, backfill
+  runs before the first sample and is included in `timings.prompt_ms`.
+- If the request has already begun target-only generation, the prompt timer is
+  already finalized. A later on-demand backfill is not prompt work according to
+  that metric and must be reported separately.
+
+Therefore a reported prompt rate is not sufficient to compare every deferred
+activation. The durable reporting contract is target capture time, backfill
+time and activation position, with TTFT reported separately when backfill
+precedes the first token.
+
+The later single-slot `mtp-deferred-cohort` does not compare immediate and
+deferred execution. With one active slot and no constraining active-limit map,
+both configurations selected immediate MTP; the near-identical 4,993.4 and
+4,994.3 t/s means only that enabling the deferred capability has no measurable
+cost when it is not selected.
+
+The phase-isolated experiment remains the applicable evidence: warm target
+capture plus its 64 MiB retained copy took 1.557 seconds on average, and MTP
+backfill took another 124.3 ms. Those timers measure actual work rather than
+relabeling TTFT. The diagnostic five-second separator was outside the recorded
+phase timings and the recorded server prompt timing.
+
+There is not yet controlled evidence that deferred MTP performs less total MTP
+computation than immediate MTP. Instrumented immediate views were already large
+logical batches and each caused one draft-context decode. The observed
+separation benefit can come from removing draft work from the target-prefill
+critical path and from executing reconstruction contiguously, but attributing
+the remaining difference to graph switching, synchronization or backend launch
+cost requires ROCm profiling.

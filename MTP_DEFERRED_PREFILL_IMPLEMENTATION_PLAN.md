@@ -203,7 +203,7 @@ first task that connects all mechanisms.
 | DP-04 RAM prompt-cache payload | Complete |
 | DP-05 startup capability and selection | Complete |
 | DP-06 server lifecycle integration | Complete |
-| DP-07 validation and documentation | In progress |
+| DP-07 validation and documentation | Complete |
 
 ## DP-01 - logical hidden archive
 
@@ -386,15 +386,15 @@ surfaces and the archive/control regression pass.
 CPU tests must cover archive mechanics and cache ownership before GPU testing.
 GPU validation then proceeds in increasing cost:
 
-1. Fresh single-slot capture/backfill reproduces the archived spike's coherent
-   512-token result and ordinary MTP drafts.
+1. [Complete] Fresh single-slot capture/backfill reproduces the archived
+   spike's coherent 512-token result and ordinary MTP drafts.
 2. [Complete] Mixed target views publish separate contiguous archives.
 3. [Complete] A deferred request remains coherent while target-only decode
    appends rows, then activates MTP at the exact current boundary.
 4. [Complete] RAM-cache save/evict/restore preserves target reuse and deferred
    archive identity without hidden-row copying.
-5. Immediate MTP, deferred MTP and target-only controls show the expected work
-   and no cross-sequence rows.
+5. [Complete] Immediate MTP, deferred MTP and target-only controls show the
+   expected work and no cross-sequence rows.
 6. [Complete for the supported Q35 path] Non-contiguous reuse drops deferred
    state but preserves the valid target fallback. Q35 context shifting itself
    is unavailable because its target memory cannot shift.
@@ -410,6 +410,14 @@ spike results are comparison evidence, not hard-coded pass thresholds.
 Current status: the CPU archive regression also covers cross-slot prefix
 extension without copying retained blocks, and server visibility exposes the
 selected prefill mode, mutable capture state and finalized archive coverage.
+
+The original single-slot spike completed 512 generated tokens after rebuilding
+all 8,192 MTP positions, then proposed 441 draft tokens and accepted 364. Its
+target-only control established the warm target baseline, while the immediate
+control exercised ordinary in-prompt MTP. Those directional controls are not a
+publishable performance A/B, but they prove that all three work paths execute.
+The later mixed-slot checks below prove sequence isolation under the durable
+implementation.
 
 The model-backed mixed-view check used three concurrent MTP-only slots with an
 active limit of one. The two deferred slots independently published archives
@@ -467,6 +475,16 @@ acceptance cycles required target checkpoint replay. It completed all 128
 requested tokens and finalized one contiguous archive covering positions
 `0..2048` (2,049 rows), proving rejected candidates remained pending until the
 authoritative acceptance callback.
+
+Timing attribution was checked against the server lifecycle. Immediate MTP and
+prompt-completion backfill both execute before the first synchronized sample and
+are included in `timings.prompt_ms`. Backfill activated after target-only
+generation begins is outside the already-finalized prompt metric and must be
+reported independently. The retained phase experiment measured warm target
+capture at 1.557 seconds and backfill at 124.3 ms. A later single-slot cohort
+with deferred capability enabled never selected deferred mode and is retained
+only as evidence that the dormant capability has no measurable overhead, not as
+an immediate/deferred comparison.
 
 ## Deferred work
 
