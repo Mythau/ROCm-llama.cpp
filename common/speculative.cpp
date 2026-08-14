@@ -1553,7 +1553,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         captures[seq_id] = {};
     }
 
-    bool backfill(llama_seq_id seq_id, const common_speculative_hidden_archive_ref & archive) {
+    common_speculative_mtp_backfill_result backfill(
+            llama_seq_id seq_id,
+            const common_speculative_hidden_archive_ref & archive) {
         GGML_ASSERT(!is_mem_shared && !chain_heads);
 
         const auto info = common_speculative_hidden_archive_get_info(archive);
@@ -1565,7 +1567,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         auto * ctx_tgt = params.ctx_tgt;
         auto * ctx_dft = params.ctx_dft;
         if (llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), seq_id) != info.pos_end) {
-            return false;
+            llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, -1, -1);
+            invalidate(seq_id);
+            return COMMON_SPECULATIVE_MTP_BACKFILL_INVALID;
         }
 
         llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, -1, -1);
@@ -1597,7 +1601,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             if (rc != 0) {
                 llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, -1, -1);
                 invalidate(seq_id);
-                return false;
+                return COMMON_SPECULATIVE_MTP_BACKFILL_RETRY;
             }
             decoded += n_rows;
         }
@@ -1605,7 +1609,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         if (llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id) != info.pos_end) {
             llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, -1, -1);
             invalidate(seq_id);
-            return false;
+            return COMMON_SPECULATIVE_MTP_BACKFILL_RETRY;
         }
 
         pending_h[seq_id] = std::move(h_previous);
@@ -1613,7 +1617,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         verify_h_rows[seq_id] = 0;
         sync[seq_id] = SYNC_SYNCHRONIZED;
         eligible[seq_id] = true;
-        return true;
+        return COMMON_SPECULATIVE_MTP_BACKFILL_SYNCHRONIZED;
     }
 
     void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
@@ -3225,16 +3229,16 @@ void common_speculative_mtp_capture_discard(common_speculative * spec, llama_seq
     spec->impl_mtp->capture_discard(seq_id);
 }
 
-bool common_speculative_mtp_backfill(
+common_speculative_mtp_backfill_result common_speculative_mtp_backfill(
         common_speculative * spec,
         llama_seq_id seq_id,
         const common_speculative_hidden_archive_ref & archive) {
     GGML_ASSERT(spec != nullptr && spec->impl_mtp != nullptr);
-    if (!spec->impl_mtp->backfill(seq_id, archive)) {
-        return false;
+    const auto result = spec->impl_mtp->backfill(seq_id, archive);
+    if (result == COMMON_SPECULATIVE_MTP_BACKFILL_SYNCHRONIZED) {
+        spec->eligible_masks[seq_id] |= 1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
     }
-    spec->eligible_masks[seq_id] |= 1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
-    return true;
+    return result;
 }
 
 bool common_speculative_process(common_speculative * spec, const llama_batch & batch) {

@@ -3511,8 +3511,16 @@ private:
             return;
         }
 
-        if (!common_speculative_mtp_backfill(spec.get(), slot.id, slot.mtp_hidden_archive)) {
+        const auto result = common_speculative_mtp_backfill(
+                spec.get(), slot.id, slot.mtp_hidden_archive);
+        if (result == COMMON_SPECULATIVE_MTP_BACKFILL_RETRY) {
             slot.mtp_backfill_blocked = true;
+            SLT_WRN(slot, "%s", "deferred MTP backfill failed; retaining archive until the next admission\n");
+            return;
+        }
+        if (result == COMMON_SPECULATIVE_MTP_BACKFILL_INVALID) {
+            SLT_WRN(slot, "%s", "deferred MTP archive no longer matches target state; dropping archive\n");
+            slot.clear_mtp_archive();
             return;
         }
 

@@ -152,7 +152,12 @@ void common_speculative_mtp_capture_begin(
 common_speculative_hidden_archive_ref common_speculative_mtp_capture_finalize(
         common_speculative * spec, llama_seq_id seq_id, llama_pos pos_end);
 void common_speculative_mtp_capture_discard(common_speculative * spec, llama_seq_id seq_id);
-bool common_speculative_mtp_backfill(
+enum common_speculative_mtp_backfill_result {
+    COMMON_SPECULATIVE_MTP_BACKFILL_SYNCHRONIZED,
+    COMMON_SPECULATIVE_MTP_BACKFILL_RETRY,
+    COMMON_SPECULATIVE_MTP_BACKFILL_INVALID,
+};
+common_speculative_mtp_backfill_result common_speculative_mtp_backfill(
         common_speculative * spec,
         llama_seq_id seq_id,
         const common_speculative_hidden_archive_ref & archive);

@@ -270,8 +270,10 @@ iterator.
 - Construct draft KV through the ordinary MTP decode path.
 - Install the final target row as `pending_h`.
 - Publish synchronized MTP only after every batch succeeds.
-- On failure, clear partial draft state and retain the valid immutable archive
-  for retry.
+- On a draft decode/commit failure, clear partial draft state and retain the
+  still-valid immutable archive for retry at the next admission. If target and
+  archive positions no longer match, clear draft state and drop the invalid
+  archive instead.
 - On success, release the live archive when no cache/backfill owner needs it.
 
 Review focus: target/archive/draft position equality at commit, no partially
@@ -281,9 +283,13 @@ Implemented as an explicit MTP operation over the archive row iterator. It
 clears and reconstructs only the selected draft sequence using the draft
 context batch capacity, installs the final hidden row as `pending_h`, and marks
 the sequence synchronized only after exact target/archive/draft position
-agreement. Decode failure removes partial draft KV and leaves the caller-owned
-archive unchanged. CPU compile/regression surfaces pass; model-backed execution
-remains in DP-07.
+agreement. Backfill returns synchronized, retryable or invalid-lineage status.
+Decode/final-draft failure removes partial draft KV, leaves the caller-owned
+archive unchanged and blocks repeated attempts for the current request. A
+target/archive mismatch removes draft state and tells the server to drop the
+invalid archive. The next admission clears the retry latch for a retained
+lineage. CPU compile/regression surfaces pass; model-backed execution remains
+in DP-07.
 
 ## DP-04 - RAM prompt-cache payload
 
@@ -394,6 +400,8 @@ GPU validation then proceeds in increasing cost:
    is unavailable because its target memory cannot shift.
 7. [Complete] Cancellation, partial acceptance and recurrent checkpoint replay
    retain exactly the authoritative target rows and leave no mutable capture.
+8. [Complete] Backfill failure distinguishes retryable draft failure from an
+   invalid target/archive lineage; retry occurs only at a later admission.
 
 Report target capture time, backfill time, retained bytes, aggregate prefill,
 decode throughput and MTP proposed/accepted counts separately. The known warm
