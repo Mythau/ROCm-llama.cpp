@@ -2894,9 +2894,10 @@ private:
                             prepared.size(), SLOT_MTP_PREFILL_TARGET_ONLY);
                     if (params_base.spec_mtp_deferred) {
                         for (size_t i = 0; i < prepared.size(); ++i) {
-                            if (prepared[i].task->is_parent() || prepared[i].task->is_child()) {
+                            if (prepared[i].task->is_parent() || prepared[i].task->is_child() ||
+                                    !prepared[i].task->need_sampling()) {
                                 policy.incoming_masks[i] &= ~mtp_mask;
-                            } else if (prepared[i].task->need_sampling()) {
+                            } else {
                                 mtp_modes[i] = (policy.incoming_masks[i] & mtp_mask)
                                     ? SLOT_MTP_PREFILL_IMMEDIATE
                                     : SLOT_MTP_PREFILL_DEFERRED;
