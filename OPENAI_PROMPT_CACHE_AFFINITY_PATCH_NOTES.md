@@ -2,10 +2,19 @@
 
 ## Objective
 
-Make llama-server behave more like an inference provider for ordinary
-OpenAI-compatible clients. Clients can send OpenAI's top-level
-`prompt_cache_key` without knowing llama-server slot IDs, and the server uses
-that key as a soft hint when selecting existing prompt-cache state.
+Let independent clients or agents return to their own cached conversation state
+without knowing llama-server slot IDs. A client sends the same
+`prompt_cache_key` with successive full-conversation requests; llama-server then
+prefers the resident slot or RAM prompt entry created by that key's earlier
+request. If the token prefix still matches, only the new suffix needs to be
+evaluated instead of prefilling the full conversation again.
+
+This is especially useful on a multi-slot server, where ordinary LRU or
+prefix-only selection can otherwise send a returning agent to a slot containing
+another caller's cache state. The key supplies caller/conversation affinity; it
+does not replace token-prefix validation or reserve capacity. All clients still
+connect to the same llama-server port; slots are internal execution contexts,
+not separate network endpoints.
 
 ## What changed
 

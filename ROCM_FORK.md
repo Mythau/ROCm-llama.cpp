@@ -137,18 +137,29 @@ the exact implementation, validation and limitations.
 The objective is to capture the large speculative-decoding benefit available
 under single-stream demand, then progressively remove speculative work as
 concurrent demand rises until the server reaches a normal non-speculative state.
-This does not yet provide a general request scheduler. Separate llama-server
-processes still require port management in the calling software. A single-port
-llama.cpp-side scheduler using caller identifiers is the current preferred
-direction, but the choice between internal scheduling and an external routing
-layer remains open.
+The existing llama-server scheduler already serves concurrent requests through
+one listening port and assigns them to its internal slots. This patch changes
+which speculative implementations each request may use as those slots become
+occupied; it does not add a second scheduler or require one port per slot.
+Separate llama-server processes still require external port and process
+management.
 
 ## OpenAI prompt-cache affinity
 
-The OpenAI-compatible Chat Completions and Responses routes accept
-`prompt_cache_key` and use it as soft affinity for existing resident or RAM
-prompt-cache state. The tokenized common prefix remains authoritative, and a
-busy matching slot does not block another free slot from serving the request.
+This fork adds `prompt_cache_key` to the OpenAI-compatible Chat Completions and
+Responses routes. A returning agent can send the same key with its full updated
+conversation, causing llama-server to look first for that agent's earlier
+resident or RAM-cached prompt state. When the token prefix still matches, the
+server reuses it and evaluates only the newly appended suffix rather than
+prefilling the full conversation again. Clients therefore do not need to know
+or manage physical llama-server slot IDs.
+
+The key remains soft affinity rather than ownership: the tokenized common
+prefix is authoritative, and a busy matching slot does not block another free
+slot from serving the request. All clients continue to use the same server port;
+the affinity key only improves the internal choice of resident or RAM-cached
+state. This section describes a local fork patch, not upstream llama.cpp
+behaviour.
 
 The connection and concurrent streaming work with OpenCode 1.18.18. Direct API
 tests also confirm keyed resident reuse and five-request queuing on a four-slot

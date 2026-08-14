@@ -1175,14 +1175,27 @@ To know the `id` of the adapter, use GET `/lora-adapters`
 
 ## OpenAI-compatible API Endpoints
 
-### Prompt-cache affinity
+### Prompt-cache affinity (experimental fork patch)
 
-`POST /v1/chat/completions` and `POST /v1/responses` accept the OpenAI
-`prompt_cache_key` string. When prompt caching is enabled, llama-server uses a
-non-empty key as soft affinity for an idle resident slot or a saved RAM prompt
-cache entry. The key is not a physical slot ID, does not reserve a slot, and
-does not prove that a cache hit exists. The tokenized prompt's actual common
-prefix remains the authority for KV-cache reuse.
+This branch adds support for the OpenAI `prompt_cache_key` string on
+`POST /v1/chat/completions` and `POST /v1/responses`. This is a local fork
+feature, not a claim about upstream llama.cpp behaviour. See the
+[fork patch notes](../../OPENAI_PROMPT_CACHE_AFFINITY_PATCH_NOTES.md) for its
+implementation and validation status.
+
+The practical purpose is to steer successive requests from the same caller or
+conversation back toward the prompt/KV state created by their earlier request.
+For example, if an agent repeatedly sends the full conversation with
+`"prompt_cache_key": "agent-a"`, llama-server first looks for an idle resident
+slot or saved RAM entry previously associated with `agent-a`. When the tokens
+still share the expected prefix, the server can reuse that cached prefix and
+evaluate only the newly appended suffix instead of prefilling the full
+conversation again.
+
+The key is not a physical slot ID, does not reserve a slot, and does not itself
+authorize KV reuse. The tokenized prompt's actual common prefix remains the
+authority. If the matching state is busy, missing or incompatible, ordinary
+slot/cache selection remains available.
 
 Clients should send a stable conversation or user/session identifier, continue
 to send the full conversation or prompt on every request, and leave

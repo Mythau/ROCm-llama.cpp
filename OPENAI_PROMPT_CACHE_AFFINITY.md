@@ -9,6 +9,13 @@ Accept OpenAI's top-level `prompt_cache_key` on Chat Completions and Responses
 requests and use it as a soft affinity hint for llama-server's existing resident
 slot and RAM prompt-cache selection.
 
+In practical terms, a returning agent sends the same key and its full updated
+conversation. The server first looks for the slot or saved RAM state used by
+that key previously. If the tokens still share the cached prefix, llama-server
+reuses that prefix and evaluates only the newly appended conversation suffix.
+This avoids requiring an OpenAI-compatible client to understand or manage
+llama-server's physical `id_slot` values.
+
 OpenAI contract: <https://developers.openai.com/api/docs/guides/prompt-caching>
 
 The key does not authorize KV reuse. The tokenized prompt's actual common prefix
