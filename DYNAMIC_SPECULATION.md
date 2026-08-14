@@ -157,8 +157,14 @@ Ngram-mod has no model KV cache and is cheap to keep resident.
 Requirements:
 
 - When ngram is eligible, preserve its existing prompt/token learning and proposal behavior.
-- When ngram is disabled for a request, skip its `begin`, `draft` and `accept` work completely in v1.
-- Do not add a passive disabled-request observation path in v1; its decode history will not train the shared pool.
+- When ngram is disabled for a request, skip proposal and acceptance work.
+- Keep `ngram-mod` observation active independently of proposal eligibility so
+  accepted prompt/decode history continues training its shared resident table.
+  This observer performs CPU table updates only and does not submit speculative
+  tokens for target verification.
+- Do not add passive residency work to the other n-gram implementations merely
+  for symmetry: simple has no resident corpus, map indexes can be rebuilt from
+  retained history, and ngram-cache requires a separate update-semantics fix.
 - Permit immediate per-request admission or demotion without model-state reconstruction.
 - Keep the shared hash pool resident across occupancy changes.
 

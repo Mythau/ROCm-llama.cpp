@@ -46,6 +46,9 @@ behavior.
 - Added implementation-agnostic loaded and per-sequence eligibility masks to
   `common_speculative`.
 - Added fixed-mask ngram begin/draft/accept gating.
+- Separated `ngram-mod` observation from proposal eligibility. Requests that
+  are dynamically ineligible to draft still feed accepted prompt and decode
+  history into the shared resident n-gram table.
 - Added eligibility-aware MTP prompt/decode mirroring, raw target-row to compact
   draft-row mapping and explicit unknown/synchronized/invalid state.
 - Added exact-target-view NextN switching. MTP views use `(true, false)`;
@@ -64,6 +67,32 @@ behavior.
   transaction.
 - Added `--spec-active-limit`, startup validation, `/props` policy reporting and
   additive `/slots.speculative_policy` visibility.
+
+## Ngram-mod observation while disabled
+
+Dynamic admission can disable n-gram drafting when concurrency rises, but that
+does not mean the generated history has stopped being useful. `ngram-mod` owns
+a shared resident table of token histories and candidate following tokens. The
+observation path continues recording accepted history from busy streams in that
+table even while those streams are not allowed to propose speculative tokens.
+Later requests that become n-gram-eligible can therefore locate continuations
+learned during the high-concurrency period instead of finding that residency
+stale at the point where demand falls.
+
+Observation is deliberately separate from speculative execution. A disabled
+stream performs no n-gram proposal, acceptance or target-verification work. The
+observer only updates the CPU-resident `ngram-mod` table; it launches no GPU
+work. `ngram-simple` has no resident corpus, the map implementations can rebuild
+their prompt indexes lazily, and `ngram-cache` is not included in this behavior.
+
+An eight-slot A/B used eight synchronized 8K-prompt/4K-decode requests with
+`ngram-mod=1`, so all streams were dynamically ineligible to draft. Proposal,
+generation and acceptance counts remained zero while observation populated
+53,763 resident entries. Against the same build without observation, the single
+measured observer wave was 1.56% lower in aggregate prefill, 1.34% lower in
+aggregate decode and 1.33% lower in end-to-end generation. Treat these values
+as a directional cost measurement rather than a stable regression estimate;
+the A/B contains one measured wave per side.
 
 ## Cache behavior
 

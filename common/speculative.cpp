@@ -166,6 +166,8 @@ struct common_speculative_impl {
 
     virtual void reset(llama_seq_id /*seq_id*/) {}
 
+    virtual void observe(const common_speculative_draft_params_vec & /*dparams*/) {}
+
     virtual void draft(common_speculative_draft_params_vec & dparams) = 0;
 
     virtual void accept(llama_seq_id seq_id, uint16_t n_accepted, bool is_other) = 0;
@@ -2118,15 +2120,9 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
         }
     }
 
-    void draft_one(
-            llama_seq_id seq_id,
-            common_speculative_draft_params & dparams) {
+    void observe_one(llama_seq_id seq_id, const common_speculative_draft_params & dparams) {
         auto & sinfo = sinfos[seq_id];
-        auto & result = *dparams.result;
-
         const auto & prompt = *dparams.prompt;
-
-        sinfo.n_draft_last = 0;
 
         const size_t cur_len = prompt.size();
         if (cur_len < mod.get_n()) {
@@ -2143,6 +2139,32 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
 
             sinfo.i_last = cur_len - n;
         }
+    }
+
+    void observe(const common_speculative_draft_params_vec & dparams) override {
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+            if (dparams[seq_id].drafting) {
+                observe_one(seq_id, dparams[seq_id]);
+            }
+        }
+    }
+
+    void draft_one(
+            llama_seq_id seq_id,
+            common_speculative_draft_params & dparams) {
+        auto & sinfo = sinfos[seq_id];
+        auto & result = *dparams.result;
+
+        const auto & prompt = *dparams.prompt;
+
+        sinfo.n_draft_last = 0;
+
+        const size_t cur_len = prompt.size();
+        if (cur_len < mod.get_n()) {
+            return;
+        }
+
+        const size_t n = mod.get_n();
 
         result.resize(n + params.n_max);
         for (size_t i = 0; i < n - 1; ++i) {
@@ -2910,7 +2932,8 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
     }
 
     for (auto & impl : spec->impls) {
-        if (!common_speculative_is_eligible(spec, seq_id, impl->type)) {
+        if (!common_speculative_is_eligible(spec, seq_id, impl->type) &&
+                !common_speculative_type_is_ngram(impl->type)) {
             continue;
         }
 
@@ -2984,6 +3007,15 @@ void common_speculative_draft(common_speculative * spec) {
 
         if (n_drafting == 0) {
             return;
+        }
+    }
+
+    // Observation is independent from proposal eligibility. Stateful n-gram
+    // implementations keep learning the active request history even when the
+    // dynamic policy prevents them from drafting for that request.
+    for (auto & impl : spec->impls) {
+        if (common_speculative_type_is_ngram(impl->type)) {
+            impl->observe(dparams);
         }
     }
 
