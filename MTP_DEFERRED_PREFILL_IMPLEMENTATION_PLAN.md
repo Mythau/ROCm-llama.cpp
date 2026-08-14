@@ -387,8 +387,9 @@ GPU validation then proceeds in increasing cost:
    archive identity without hidden-row copying.
 5. Immediate MTP, deferred MTP and target-only controls show the expected work
    and no cross-sequence rows.
-6. Context shift/non-contiguous reuse drops deferred state but preserves the
-   valid target fallback.
+6. [Complete for the supported Q35 path] Non-contiguous reuse drops deferred
+   state but preserves the valid target fallback. Q35 context shifting itself
+   is unavailable because its target memory cannot shift.
 
 Report target capture time, backfill time, retained bytes, aggregate prefill,
 decode throughput and MTP proposed/accepted counts separately. The known warm
@@ -430,6 +431,19 @@ deferred archive lineage as archive `4` with 2,166 rows. MTP became ready and
 the continuation produced 83 draft tokens with 49 accepted. Cache attachment
 and take/apply retain the shared archive reference; no hidden-row copy is made
 by the RAM-cache path.
+
+Lineage mutation checks distinguish the paths rather than treating every reuse
+as equivalent. Strict extension preserves deferred coverage and was exercised
+by both resident and cross-slot cache activation above. The CPU archive
+regression slices a boundary block by shared reference and extends that prefix
+without changing either source archive. On Q35, exact and shorter target reuse
+requires recurrent target-checkpoint restoration: an 844-row deferred archive
+was dropped while 840 target rows were retained and four reevaluated, leaving a
+valid target-only request; a shorter request correctly fell back to full target
+and immediate-MTP prefill. Q35 target memory reports that it cannot shift, so
+the server disables context shifting before requests run. The unavailable shift
+branch is source-checked to clear the archive before target `seq_rm/seq_add`;
+no model-backed context-shift result is claimed.
 
 ## Deferred work
 
