@@ -378,7 +378,7 @@ GPU validation then proceeds in increasing cost:
 
 1. Fresh single-slot capture/backfill reproduces the archived spike's coherent
    512-token result and ordinary MTP drafts.
-2. Mixed two-slot target views publish separate contiguous archives.
+2. [Complete] Mixed target views publish separate contiguous archives.
 3. A deferred request remains coherent while target-only decode appends rows,
    then activates MTP at the exact current boundary.
 4. RAM-cache save/evict/restore preserves target reuse and deferred archive
@@ -395,8 +395,14 @@ spike results are comparison evidence, not hard-coded pass thresholds.
 Current status: the CPU archive regression also covers cross-slot prefix
 extension without copying retained blocks, and server visibility exposes the
 selected prefill mode, mutable capture state and finalized archive coverage.
-Model-backed GPU validation is intentionally pending while the GPUs are in use
-by another task.
+
+The model-backed mixed-view check used three concurrent MTP-only slots with an
+active limit of one. The two deferred slots independently published archives
+`1` and `2`; both covered logical positions `0..4558`, contained 4,559 rows and
+retained 37,365,900 bytes. Each resident archive then restored the complete
+4,559-row target prefix on its own slot, backfilled independently, became MTP
+ready and produced ordinary MTP drafts (61/42 and 55/44 proposed/accepted).
+Neither continuation contained the other slot's sentinel.
 
 ## Deferred work
 
