@@ -170,8 +170,10 @@ Deferred integration follows those existing transitions:
 - Prompt save shares it with the RAM cache before unified-KV idle clearing.
 - `prompt_clear()`, context shift, non-contiguous chunk reuse and incompatible
   slot reuse drop it before mutating the corresponding target history.
-- Cancellation during mutable capture discards the unpublished builder; a
-  finalized immutable archive follows the retained target state.
+- Cancellation that retains a coherent target prefix finalizes matching
+  archive coverage with that prefix. An abort path which discards target state
+  also discards the mutable builder. A finalized immutable archive follows the
+  retained target state.
 
 The current occupancy planner demotes on admission and does not generally
 promote survivors. Deferred activation is therefore a narrowly defined new
@@ -390,6 +392,8 @@ GPU validation then proceeds in increasing cost:
 6. [Complete for the supported Q35 path] Non-contiguous reuse drops deferred
    state but preserves the valid target fallback. Q35 context shifting itself
    is unavailable because its target memory cannot shift.
+7. [Complete] Cancellation, partial acceptance and recurrent checkpoint replay
+   retain exactly the authoritative target rows and leave no mutable capture.
 
 Report target capture time, backfill time, retained bytes, aggregate prefill,
 decode throughput and MTP proposed/accepted counts separately. The known warm
@@ -444,6 +448,17 @@ and immediate-MTP prefill. Q35 target memory reports that it cannot shift, so
 the server disables context shifting before requests run. The unavailable shift
 branch is source-checked to clear the archive before target `seq_rm/seq_add`;
 no model-backed context-shift result is claimed.
+
+The lifecycle interruption check closed a streaming client while deferred
+capture was active at 2,486 processed rows. The server finished the target
+region already in flight, cancelled the task and finalized a coherent 3,003-row
+archive matching the retained target prefix. A later recurrent-checkpoint path
+preserved valid target fallback without reusing stale MTP state. Separately, a
+deferred request made 170 n-gram proposals with 67 accepted while four partial
+acceptance cycles required target checkpoint replay. It completed all 128
+requested tokens and finalized one contiguous archive covering positions
+`0..2048` (2,049 rows), proving rejected candidates remained pending until the
+authoritative acceptance callback.
 
 ## Deferred work
 
