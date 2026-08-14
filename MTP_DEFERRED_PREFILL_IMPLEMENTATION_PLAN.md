@@ -383,8 +383,8 @@ GPU validation then proceeds in increasing cost:
 2. [Complete] Mixed target views publish separate contiguous archives.
 3. [Complete] A deferred request remains coherent while target-only decode
    appends rows, then activates MTP at the exact current boundary.
-4. RAM-cache save/evict/restore preserves target reuse and deferred archive
-   identity without hidden-row copying.
+4. [Complete] RAM-cache save/evict/restore preserves target reuse and deferred
+   archive identity without hidden-row copying.
 5. Immediate MTP, deferred MTP and target-only controls show the expected work
    and no cross-sequence rows.
 6. Context shift/non-contiguous reuse drops deferred state but preserves the
@@ -420,6 +420,16 @@ n-gram verification was occurring, synchronized at 2,589 and completed all 128
 requested tokens (67 speculative proposals, 42 accepted). Exact archive/target
 position agreement at backfill proves that only the accepted verification
 prefix was published; rejected candidate rows were not retained.
+
+The RAM-cache ownership check completed a deferred request under concurrent
+demand, displaced its resident slot so the target state plus shared archive
+entered the existing RAM cache, made that slot most-recently used, then issued
+an unpinned strict extension. LRU selected the other slot. Restore reused 2,165
+target rows and evaluated one extension row; the server then activated the same
+deferred archive lineage as archive `4` with 2,166 rows. MTP became ready and
+the continuation produced 83 draft tokens with 49 accepted. Cache attachment
+and take/apply retain the shared archive reference; no hidden-row copy is made
+by the RAM-cache path.
 
 ## Deferred work
 
