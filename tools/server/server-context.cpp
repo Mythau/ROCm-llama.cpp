@@ -1545,6 +1545,10 @@ private:
             SRV_INF("speculative active limits: %s\n",
                     speculative_active_limits_to_str(params_base.spec_active_limits).c_str());
         }
+        if (spec && common_speculative_is_loaded(spec.get(), COMMON_SPECULATIVE_TYPE_NGRAM_MOD)) {
+            SRV_INF("ngram-mod pool update: %s\n",
+                    common_ngram_mod_pool_update_name(params_base.speculative.ngram_mod.pool_update));
+        }
 
         for (int i = 0; i < params_base.n_parallel; i++) {
             server_slot & slot = slots[i];
@@ -5139,6 +5143,13 @@ void server_routes::init_routes() {
         }
         if (!params.spec_active_limits.empty()) {
             props["speculative_active_limits"] = speculative_active_limits_to_json(params.spec_active_limits);
+        }
+        if (std::find(
+                    params.speculative.types.begin(),
+                    params.speculative.types.end(),
+                    COMMON_SPECULATIVE_TYPE_NGRAM_MOD) != params.speculative.types.end()) {
+            props["speculative_ngram_mod_pool_update"] =
+                common_ngram_mod_pool_update_name(params.speculative.ngram_mod.pool_update);
         }
         res->ok(props);
         return res;

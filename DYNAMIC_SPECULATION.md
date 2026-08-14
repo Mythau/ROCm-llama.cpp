@@ -158,15 +158,22 @@ Requirements:
 
 - When ngram is eligible, preserve its existing prompt/token learning and proposal behavior.
 - When ngram is disabled for a request, skip proposal and acceptance work.
-- Keep `ngram-mod` observation active independently of proposal eligibility so
-  accepted prompt/decode history continues training its shared resident table.
-  This observer performs CPU table updates only and does not submit speculative
-  tokens for target verification.
+- Make `ngram-mod` pool updates explicit with
+  `--spec-ngram-mod-pool-update loaded|eligible`. The default `loaded` mode
+  observes accepted prompt/decode history independently of proposal eligibility
+  so it continues training the shared resident table. `eligible` restricts pool
+  updates to requests allowed to propose. Neither mode lets an ineligible
+  request submit speculative tokens for target verification.
 - Do not add passive residency work to the other n-gram implementations merely
   for symmetry: simple has no resident corpus, map indexes can be rebuilt from
   retained history, and ngram-cache requires a separate update-semantics fix.
 - Permit immediate per-request admission or demotion without model-state reconstruction.
 - Keep the shared hash pool resident across occupancy changes.
+
+The server logs the selected pool-update mode at startup and returns it from
+`GET /props` as `speculative_ngram_mod_pool_update`. Trace statistics split
+direct pool updates into eligible and ineligible counts, making `eligible`
+versus `loaded` behavior observable without inferring it from generation output.
 
 The existing implementation priority remains useful: ngram-mod attempts a draft first, and MTP is the fallback when ngram-mod has no draft.
 

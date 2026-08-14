@@ -179,7 +179,7 @@ Currently, a single hash pool is shared across all server slots, so different re
 # - MoEs require long drafts
 # - dense models: can reduce `--spec-ngram-mod-n-min` and `--spec-ngram-mod-n-max`
 
-llama-server ... --spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64
+llama-server ... --spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64 --spec-ngram-mod-pool-update loaded
 ```
 
 Applications:
@@ -209,6 +209,8 @@ Example Video:
 The limit applies to incoming and already active requests. Losing eligibility is sticky for the rest of that request; a later request is evaluated afresh. The option is server-wide, not part of the request JSON API. A non-empty mapping must name every loaded implementation, every named implementation must be loaded, and each limit must be between one and `--parallel`. Dynamic active limits currently support MTP and the n-gram implementations only; draft-simple, Eagle3, DFlash and DSpark remain static-only. Omitting the option preserves the static speculative behavior.
 
 When configured, the effective mapping is logged once after speculative initialization and is exposed by `GET /props` as `speculative_active_limits`, an object keyed by speculative implementation name. `GET /slots` preserves its existing Boolean `speculative` field and adds a `speculative_policy` object containing the slot phase, eligible mask and implementation names, any pending demotion mask and names, and synchronized stateful or MTP readiness when those implementations are loaded. Both additions are omitted when `--spec-active-limit` is not configured.
+
+`--spec-ngram-mod-pool-update loaded|eligible` controls whether requests that are dynamically ineligible for `ngram-mod` still update its shared resident pool. The default, `loaded`, records prompt and accepted decode history from every generating request while `ngram-mod` is loaded, without allowing ineligible requests to propose or accept drafts. `eligible` updates the pool only for requests currently allowed to propose. The selected value is logged at startup and exposed by `GET /props` as `speculative_ngram_mod_pool_update`. Speculative trace statistics report eligible and ineligible pool-update counts separately.
 
 ## Command-Line Options
 
@@ -319,6 +321,10 @@ Unsupported samplers and device layouts fall back to CPU sampling. Tensor split 
                                         minimum number of ngram tokens to use for ngram-based speculative decoding (default: 48)
 --spec-ngram-mod-n-max                  N
                                         maximum number of ngram tokens to use for ngram-based speculative decoding (default: 64)
+--spec-ngram-mod-pool-update            MODE
+                                        when to update the shared ngram-mod pool: eligible = proposal-eligible requests only,
+                                        loaded = all generating requests while ngram-mod is loaded (default: loaded)
+                                        (env: LLAMA_ARG_SPEC_NGRAM_MOD_POOL_UPDATE)
 ```
 
 ### n-gram Simple Parameters

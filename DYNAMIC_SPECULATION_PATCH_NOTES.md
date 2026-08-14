@@ -5,6 +5,67 @@ decoding. It is intended for a fixed multi-slot home server that should retain
 the single-request benefit of MTP and ngram-mod without paying their full
 prompt-processing cost as concurrency rises.
 
+## Invocation commands
+
+```text
+--spec-type draft-mtp,ngram-mod --spec-active-limit draft-mtp=1,ngram-mod=2
+--spec-type ngram-mod --spec-active-limit ngram-mod=1
+--spec-ngram-mod-pool-update loaded
+--spec-ngram-mod-pool-update eligible
+curl -s http://127.0.0.1:8080/props
+curl -s http://127.0.0.1:8080/slots
+```
+
+`--spec-type draft-mtp,ngram-mod --spec-active-limit draft-mtp=1,ngram-mod=2`
+loads both implementations. One occupied stream may use MTP and ngram-mod, two
+may use ngram-mod only, and three or more use neither implementation.
+
+
+`--spec-type ngram-mod --spec-active-limit ngram-mod=1` loads only ngram-mod and
+allows it to propose for a single occupied stream. It is the simplest invocation
+for testing resident observation while concurrent requests are ineligible.
+
+
+`--spec-ngram-mod-pool-update loaded` keeps updating the shared resident pool
+from all generating requests while ngram-mod is loaded, irrespective of if
+speculative decoding via ngram-mod is active or not. This is the default.
+
+
+`--spec-ngram-mod-pool-update eligible` updates the shared resident pool only
+while ngram-mod is active, and concurrency is not past it's active limit.
+
+
+`curl -s http://127.0.0.1:8080/props` reports `speculative_active_limits` and
+`speculative_ngram_mod_pool_update` without requiring inference from generated
+text.
+
+
+`curl -s http://127.0.0.1:8080/slots` reports each slot's current speculative
+eligibility, pending demotion and implementation readiness.
+
+
+With `--verbosity 4`, the ngram-mod statistics line reports total, eligible and
+ineligible pool updates plus current pool occupancy.
+
+## Currently known behavior
+
+- `loaded` is the default pool-update mode and preserves continued observation
+  while dynamic proposal eligibility is disabled.
+- `eligible` suppresses prompt and decode-history pool updates for requests that
+  are not currently allowed to propose through `ngram-mod`.
+- Pool-update policy and proposal policy are independent. An ineligible request
+  in `loaded` mode updates the CPU-resident pool but performs no ngram proposal,
+  acceptance or target-verification work.
+- Passive resident observation applies only to `ngram-mod`. It is not enabled
+  for `ngram-simple`, either map implementation, or `ngram-cache`.
+- Eligibility can be removed during a request but is not restored when
+  occupancy falls. A later request receives a fresh admission decision.
+- The policy is server-wide and fixed at startup; there is no per-request JSON
+  override.
+- The same-binary live-server A/B currently proves 4,840 ineligible updates and
+  4,112 resident entries in `loaded` mode versus zero updates and zero occupancy
+  in `eligible` mode for the synchronized disabled wave described below.
+
 ## Objective
 
 The objective is to exploit speculative decoding when demand consists of a
@@ -46,9 +107,10 @@ behavior.
 - Added implementation-agnostic loaded and per-sequence eligibility masks to
   `common_speculative`.
 - Added fixed-mask ngram begin/draft/accept gating.
-- Separated `ngram-mod` observation from proposal eligibility. Requests that
-  are dynamically ineligible to draft still feed accepted prompt and decode
-  history into the shared resident n-gram table.
+- Added `--spec-ngram-mod-pool-update loaded|eligible`. In the default `loaded`
+  mode, requests that are dynamically ineligible to draft still feed accepted
+  prompt and decode history into the shared resident n-gram table. `eligible`
+  restricts updates to proposal-eligible requests.
 - Added eligibility-aware MTP prompt/decode mirroring, raw target-row to compact
   draft-row mapping and explicit unknown/synchronized/invalid state.
 - Added exact-target-view NextN switching. MTP views use `(true, false)`;
@@ -72,9 +134,10 @@ behavior.
 
 Dynamic admission can disable n-gram drafting when concurrency rises, but that
 does not mean the generated history has stopped being useful. `ngram-mod` owns
-a shared resident table of token histories and candidate following tokens. The
-observation path continues recording accepted history from busy streams in that
-table even while those streams are not allowed to propose speculative tokens.
+a shared resident table of token histories and candidate following tokens. In
+the default `loaded` mode, the observation path continues recording accepted
+history from busy streams in that table even while those streams are not allowed
+to propose speculative tokens.
 Later requests that become n-gram-eligible can therefore locate continuations
 learned during the high-concurrency period instead of finding that residency
 stale at the point where demand falls.
@@ -85,6 +148,11 @@ observer only updates the CPU-resident `ngram-mod` table; it launches no GPU
 work. `ngram-simple` has no resident corpus, the map implementations can rebuild
 their prompt indexes lazily, and `ngram-cache` is not included in this behavior.
 
+Use `--spec-ngram-mod-pool-update eligible` to suppress those passive resident
+updates. The selected mode is printed at startup and exposed by `GET /props` as
+`speculative_ngram_mod_pool_update`. Trace statistics split direct pool updates
+into eligible and ineligible counts.
+
 An eight-slot A/B used eight synchronized 8K-prompt/4K-decode requests with
 `ngram-mod=1`, so all streams were dynamically ineligible to draft. Proposal,
 generation and acceptance counts remained zero while observation populated
@@ -93,6 +161,14 @@ measured observer wave was 1.56% lower in aggregate prefill, 1.34% lower in
 aggregate decode and 1.33% lower in end-to-end generation. Treat these values
 as a directional cost measurement rather than a stable regression estimate;
 the A/B contains one measured wave per side.
+
+A same-binary server A/B also exercised the new startup switch with eight
+512-token-prompt/128-token-decode requests and `ngram-mod=1`. `loaded` reported
+4,840 ineligible pool updates and 4,112 resident entries while executing zero
+disabled drafts; an identical eligible replay then accepted 56 speculative
+tokens. `eligible` reported zero pool updates and zero occupancy for the same
+disabled wave, and its replay generated no draft. Both runs reported their
+selected mode in the startup log and `GET /props`.
 
 ## Cache behavior
 

@@ -161,12 +161,16 @@ struct common_speculative_impl {
     virtual ~common_speculative_impl() = default;
 
     virtual void begin(llama_seq_id seq_id, const llama_tokens & prompt) = 0;
+    virtual bool begin_when_ineligible() const { return false; }
+    virtual void begin_ineligible(llama_seq_id seq_id, const llama_tokens & prompt) { begin(seq_id, prompt); }
 
     virtual bool process(const llama_batch & batch, const std::vector<uint32_t> & eligible_masks) = 0;
 
     virtual void reset(llama_seq_id /*seq_id*/) {}
 
-    virtual void observe(const common_speculative_draft_params_vec & /*dparams*/) {}
+    virtual void observe(
+            const common_speculative_draft_params_vec & /*dparams*/,
+            const std::vector<uint32_t> & /*eligible_masks*/) {}
 
     virtual void draft(common_speculative_draft_params_vec & dparams) = 0;
 
@@ -178,6 +182,8 @@ struct common_speculative_impl {
     virtual void clear_state(llama_seq_id /*seq_id*/) {}
     virtual bool requires_state() const { return false; }
     virtual bool state_synchronized(llama_seq_id /*seq_id*/) const { return false; }
+
+    virtual std::string extra_stats() const { return {}; }
 
     // true if this implementation requires the target context to extract post-norm embeddings
     virtual bool need_embd() const = 0;
@@ -2055,6 +2061,9 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
     // enable trace logging if LLAMA_TRACE is set
     const bool verbose;
 
+    size_t n_pool_updates_eligible = 0;
+    size_t n_pool_updates_ineligible = 0;
+
     struct seq_info {
         // the last position in the prompt that was added to the ngram container
         size_t i_last = 0;
@@ -2080,6 +2089,7 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
         SPC_TRC("%s", "adding speculative implementation 'ngram-mod'\n");
         SPC_TRC("- n_match=%d, n_max=%d, n_min=%d\n",
                 this->params.n_match, this->params.n_max, this->params.n_min);
+        SPC_TRC("- pool_update=%s\n", common_ngram_mod_pool_update_name(this->params.pool_update));
         SPC_TRC("- mod size=%zu (%.3f MB)\n",
                 mod.size(), (float)(mod.size_bytes())/1024/1024);
 
@@ -2091,7 +2101,15 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
         sinfos.resize(n_seq);
     }
 
-    void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
+    void add_pool_updates(size_t count, bool eligible) {
+        if (eligible) {
+            n_pool_updates_eligible += count;
+        } else {
+            n_pool_updates_ineligible += count;
+        }
+    }
+
+    void begin_one(llama_seq_id seq_id, const llama_tokens & prompt, bool eligible) {
         auto & sinfo = sinfos[seq_id];
 
         sinfo.i_last = 0;
@@ -2103,9 +2121,11 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
             return;
         }
 
-        for (size_t i = 0; i < prompt.size() - n; ++i) {
+        const size_t n_updates = prompt.size() - n;
+        for (size_t i = 0; i < n_updates; ++i) {
             mod.add(prompt.data() + i);
         }
+        add_pool_updates(n_updates, eligible);
 
         sinfo.i_last = prompt.size() - n;
 
@@ -2120,7 +2140,22 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
         }
     }
 
-    void observe_one(llama_seq_id seq_id, const common_speculative_draft_params & dparams) {
+    void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
+        begin_one(seq_id, prompt, true);
+    }
+
+    bool begin_when_ineligible() const override {
+        return params.pool_update == COMMON_NGRAM_MOD_POOL_UPDATE_LOADED;
+    }
+
+    void begin_ineligible(llama_seq_id seq_id, const llama_tokens & prompt) override {
+        begin_one(seq_id, prompt, false);
+    }
+
+    void observe_one(
+            llama_seq_id seq_id,
+            const common_speculative_draft_params & dparams,
+            bool eligible) {
         auto & sinfo = sinfos[seq_id];
         const auto & prompt = *dparams.prompt;
 
@@ -2133,20 +2168,38 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
 
         // add new ngrams in chunks
         if (sinfo.i_last + 32 < cur_len) {
+            size_t n_updates = 0;
             for (size_t i = sinfo.i_last; i < cur_len - n; ++i) {
                 mod.add(prompt.data() + i);
+                n_updates++;
             }
+            add_pool_updates(n_updates, eligible);
 
             sinfo.i_last = cur_len - n;
         }
     }
 
-    void observe(const common_speculative_draft_params_vec & dparams) override {
+    void observe(
+            const common_speculative_draft_params_vec & dparams,
+            const std::vector<uint32_t> & eligible_masks) override {
+        const uint32_t type_mask = 1u << type;
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
-            if (dparams[seq_id].drafting) {
-                observe_one(seq_id, dparams[seq_id]);
+            const bool eligible = (eligible_masks[seq_id] & type_mask) != 0;
+            if (dparams[seq_id].drafting &&
+                    (eligible || params.pool_update == COMMON_NGRAM_MOD_POOL_UPDATE_LOADED)) {
+                observe_one(seq_id, dparams[seq_id], eligible);
             }
         }
+    }
+
+    std::string extra_stats() const override {
+        return string_format(
+                ", pool updates = %zu (eligible = %zu, ineligible = %zu), occupancy = %zu/%zu",
+                n_pool_updates_eligible + n_pool_updates_ineligible,
+                n_pool_updates_eligible,
+                n_pool_updates_ineligible,
+                mod.get_used(),
+                mod.size());
     }
 
     void draft_one(
@@ -2932,13 +2985,17 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
     }
 
     for (auto & impl : spec->impls) {
-        if (!common_speculative_is_eligible(spec, seq_id, impl->type) &&
-                !common_speculative_type_is_ngram(impl->type)) {
+        const bool eligible = common_speculative_is_eligible(spec, seq_id, impl->type);
+        if (!eligible && !impl->begin_when_ineligible()) {
             continue;
         }
 
         common_time_meas tm(impl->t_begin_us, !impl->gen_perf);
-        impl->begin(seq_id, prompt);
+        if (eligible) {
+            impl->begin(seq_id, prompt);
+        } else {
+            impl->begin_ineligible(seq_id, prompt);
+        }
         impl->n_call_begin++;
     }
 }
@@ -3010,12 +3067,11 @@ void common_speculative_draft(common_speculative * spec) {
         }
     }
 
-    // Observation is independent from proposal eligibility. Stateful n-gram
-    // implementations keep learning the active request history even when the
-    // dynamic policy prevents them from drafting for that request.
+    // Pool update policy is implementation-specific. ngram-mod can keep
+    // learning active request history while proposal eligibility is gated.
     for (auto & impl : spec->impls) {
         if (common_speculative_type_is_ngram(impl->type)) {
-            impl->observe(dparams);
+            impl->observe(dparams, spec->eligible_masks);
         }
     }
 
@@ -3259,7 +3315,8 @@ void common_speculative_print_stats(const common_speculative * spec) {
             str_stats = ", #mean acc len = " + oss.str() + ", #acc rate/pos = (" + tmp.str() + ")";
         }
 
-        SPC_TRC("statistics %16s: #calls(b,g,a) = %4zu %6zu %6zu, #gen drafts = %6zu, #acc drafts = %5zu, #gen tokens = %6zu, #acc tokens = %5zu%s%s\n",
+        const std::string str_extra = impl->extra_stats();
+        SPC_TRC("statistics %16s: #calls(b,g,a) = %4zu %6zu %6zu, #gen drafts = %6zu, #acc drafts = %5zu, #gen tokens = %6zu, #acc tokens = %5zu%s%s%s\n",
                 common_speculative_type_to_str(impl->type).c_str(),
                 impl->n_call_begin, impl->n_call_draft, impl->n_call_accept,
                 impl->n_gen_drafts,
@@ -3267,6 +3324,7 @@ void common_speculative_print_stats(const common_speculative * spec) {
                 impl->n_gen_tokens,
                 impl->n_acc_tokens,
                 str_stats.c_str(),
+                str_extra.c_str(),
                 str_perf.c_str());
     }
 }

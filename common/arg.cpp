@@ -4167,6 +4167,22 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.ngram_mod.n_match = value;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--spec-ngram-mod-pool-update"}, "MODE",
+        string_format(
+            "when to update the shared ngram-mod pool: eligible = proposal-eligible requests only, "
+            "loaded = all generating requests while ngram-mod is loaded (default: %s)",
+            common_ngram_mod_pool_update_name(params.speculative.ngram_mod.pool_update)),
+        [](common_params & params, const std::string & value) {
+            if (value == "eligible") {
+                params.speculative.ngram_mod.pool_update = COMMON_NGRAM_MOD_POOL_UPDATE_ELIGIBLE;
+            } else if (value == "loaded") {
+                params.speculative.ngram_mod.pool_update = COMMON_NGRAM_MOD_POOL_UPDATE_LOADED;
+            } else {
+                throw std::invalid_argument("ngram-mod pool update must be 'eligible' or 'loaded'");
+            }
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_NGRAM_MOD_POOL_UPDATE"));
 
     add_opt(common_arg(
         {"--spec-ngram-simple-size-n"}, "N",

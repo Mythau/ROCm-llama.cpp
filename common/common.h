@@ -353,11 +353,27 @@ struct common_params_speculative_draft {
     std::vector<llama_model_tensor_buft_override> tensor_buft_overrides;
 };
 
+enum common_ngram_mod_pool_update {
+    COMMON_NGRAM_MOD_POOL_UPDATE_ELIGIBLE,
+    COMMON_NGRAM_MOD_POOL_UPDATE_LOADED,
+};
+
+inline const char * common_ngram_mod_pool_update_name(common_ngram_mod_pool_update mode) {
+    switch (mode) {
+        case COMMON_NGRAM_MOD_POOL_UPDATE_ELIGIBLE: return "eligible";
+        case COMMON_NGRAM_MOD_POOL_UPDATE_LOADED:   return "loaded";
+    }
+
+    return "unknown";
+}
+
 struct common_params_speculative_ngram_mod {
     int32_t n_match = 24;
 
     int32_t n_max = 64;
     int32_t n_min = 48;
+
+    common_ngram_mod_pool_update pool_update = COMMON_NGRAM_MOD_POOL_UPDATE_LOADED;
 };
 
 struct common_params_speculative_ngram_map {

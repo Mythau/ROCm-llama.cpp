@@ -197,6 +197,20 @@ static void test(void) {
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SPECULATIVE));
     assert(params.speculative.draft.n_max == 123);
 
+    {
+        common_params spec_params;
+        argv = {"binary_name", "--spec-ngram-mod-pool-update", "eligible"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), spec_params, LLAMA_EXAMPLE_SERVER));
+        assert(spec_params.speculative.ngram_mod.pool_update == COMMON_NGRAM_MOD_POOL_UPDATE_ELIGIBLE);
+
+        argv = {"binary_name", "--spec-ngram-mod-pool-update", "loaded"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), spec_params, LLAMA_EXAMPLE_SERVER));
+        assert(spec_params.speculative.ngram_mod.pool_update == COMMON_NGRAM_MOD_POOL_UPDATE_LOADED);
+
+        argv = {"binary_name", "--spec-ngram-mod-pool-update", "sometimes"};
+        assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), spec_params, LLAMA_EXAMPLE_SERVER));
+    }
+
     argv = {"binary_name", "-lm", "none"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.load_mode == LLAMA_LOAD_MODE_NONE);
