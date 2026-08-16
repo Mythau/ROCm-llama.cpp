@@ -6,6 +6,8 @@ Architecture contract: `COHORT_BATCHING_CONTROLLER_DESIGN.md`.
 
 Source inspected: current working tree based on commit `91a5c4911c86fa9e8b85fda27be0e6abeb75b574`, including the pre-existing local speculative/server changes. Those user-owned changes were not modified by this architecture work.
 
+Working-tree reconciliation note: the working tree currently contains the Phase 5 post_decode generating-scan edit in `tools/server/server-context.cpp` (pre_decode scan removed, post_decode scan added, capture-finalize-on-denial added) as a pre-landed change on top of the committed Phase 1 (dormant contracts, `c448db2d6`), while the second legacy MTP call site (prompt-completion transition) remains live. Phase 2 has not started. This pre-landed edit must be re-verified against the final Phase 5 design when Phase 5 lands.
+
 ## Accepted structural direction
 
 The monolithic `namespace inference_scheduler` proposal is retired. The durable mechanism has one scheduling-policy committer and several explicitly bounded components:
@@ -90,7 +92,7 @@ At a legal decision boundary, current-task progress is projected as:
 - A pending sampled input is already output-committed but still owes one target evaluation.
 - Prepared speculative extent may expand or retract. Physical prompt/KV/checkpoint/archive state may shift, restore, shrink, evict or rebuild.
 
-Pending work is a phase-neutral derived set: prompt/reconciliation, sampled token, fresh verification and mandatory replay. `inference::batching` prices/proposes it; only an `inference::control` commit authorizes it. Barriers and INTERMISSION preserve visible work while withholding authorization.
+Pending debt is a phase-neutral derived set with five classes: prompt/reconciliation, sampled-token, fresh-verification, mandatory-replay, and none (no runnable target debt). `inference::batching` prices a proposal for it; only an `inference::control` commit creates authorized work. Barriers and INTERMISSION preserve visible pending debt while withholding authorization.
 
 One monotonic per-process `inference::identity::iteration_id` correlates all commands and outcomes until one control-owned `iteration_completion`. A target iteration includes preparation commands, one `target_batch_commit`, its `batch_view` values and one complete `target_batch_outcome`; admission-only, zero-work, model-mutation and terminal-failure iterations close through other explicit completion payloads. The iteration is transient even though its allocator counter is persistent. No policy refresh occurs before completion.
 
@@ -269,9 +271,9 @@ Preparing a draft couples the sampled token, `spec_draft`, checkpoint, draft imp
 
 These are design choices, not established source facts:
 
-1. Oversized/reduced retry capacity: choose either a control-preauthorized terminal cleanup/failure action or a reported `verification_prefix_unfit` outcome followed by explicit control-committed restoration/abort and replacement work. Execution never slices, drops, despeculates or replans the prefix itself.
+1. Oversized/reduced retry capacity: RESOLVED. If the complete verification prefix cannot fit effective retry capacity, execution returns a typed `verification_prefix_unfit` result and takes the existing terminal cleanup/error path. Execution never slices, drops, despeculates, restores, or replans during this refactor. Phase 3 transfers the unfit decision from legacy authority to control, where control can later commit explicit restoration/abort and replacement work.
 2. Classify each slot/cache mutation operation as immediately serviceable or boundary-gated. Cancellation, metrics, health and shutdown signalling are immediate; global model-state mutations such as `/lora-adapters` are boundary-gated; no generic non-inference bypass exists.
-3. Incumbent embedding/rerank work: finish in NORMAL or remain a cohort blocker until it clears.
+3. Incumbent embedding/rerank work: RESOLVED. Cohort mode requires a pure inference server. If the server is started with --embedding or --reranking, cohort capability is disabled at startup; the cohort phase machine never engages and embedding/rerank tasks always run in NORMAL. No drain-window or intermission policy for embedding/rerank is needed.
 
 The public feature remains unavailable until these decisions and the final review gates are resolved.
 
@@ -381,7 +383,7 @@ It changes no runtime source or behavior.
 
 ### Objective
 
-Capture the existing NORMAL scheduler as the compatibility definition before authority moves. Phase 0 records source-annotated fixtures and currently observable target manifests/outcomes only; it does not claim live access to transient reconciled `n_past`, a shadow progress projection, or a new `iteration_id`. Those diagnostics begin with the Phase 2 translator/extraction.
+it does not claim live access to transient reconciled `reconciled_prompt_coverage` facts, a shadow progress projection, or a new `iteration_id`. Live shadow projection of transient reconciled facts begins with the Phase 2 translator unless Phase 0 explicitly authorizes behavior-neutral diagnostic instrumentation.
 
 Target-manifest fixtures record the synthetic legacy turn, unavailable/null
 `iteration_id`, exact `stream_key`, declared constituent row kinds,
@@ -443,7 +445,7 @@ Runtime authority remains entirely in current server code. Phase 1 introduces no
 - Define strong value types for `identity::stream_key`, `identity::cohort_id`, and `identity::iteration_id`. Phase 1 tests type separation; it does not allocate either monotonic ID in a runtime or simulated state machine.
 - Define exact value-based `profile::adapter_signature`, empty base signature, `cohort_mtp_mode { OFF, IMMEDIATE }`, and immutable `cohort_speculative_profile`.
 - Define passive `server_inference::stream_snapshot` facts for exact task/slot identity, raw lifecycle, exact source operation identity, input kind, embedding width, dependency, adapter/aLoRA state, speculative capabilities, prompt/output observations and physical runtime observations. COMPLETION and INFILL remain distinct operations even when both use token-sequence input; multimodal remains an input kind. The snapshot contains no preclassified runnable/capable/blocker verdict, `R`, phase or scheduling grant.
-- Keep only the exact-stream `prompt_reconciliation_result` vocabulary whose local producer and meaning are already known; it carries no iteration, cohort, closure or execution-lineage claim. Exact pending-work derivation, command/outcome correlation, committed preparation/reconciliation lineage, `server_batch` extraction, `target_manifest`, retry-view correlation and complete target outcomes begin in Phase 2 at the real legacy seams.
+Keep only the exact-stream `prompt_reconciliation_result` vocabulary whose local producer and meaning are already known; it carries no iteration, cohort, closure or execution-lineage claim. The full iteration-tagged `prompt_reconciliation_outcome` type begins in Phase 2.
 - Record single-producer semantics in types and tests: passive snapshot projection owns lifecycle-gated observations; the reconciliation producer owns its exact-stream result; admission owns complete-scope formation assessment; batching owns compatibility, reservation and row-grant proposals. Phase 1 adds no second derivation or mutable mirror.
 - Implement the lifecycle-gated passive projection for the exact current task. Stale reused-slot output/sample fields are ignored outside their legal lifecycle; prepared/retractable and physical facts remain visibly distinct from committed logical facts.
 - Keep runtime speculative eligibility/synchronization, immutable cohort allowed profile and effective reservation masks as distinct inputs.
@@ -508,7 +510,20 @@ None. A single legacy planner remains the sole runtime scheduling authority. `se
 - Reshape `server_context::update_slots()` into the mechanical pump contract without transferring runtime authority yet: snapshot, legacy decision, exact dispatch, complete outcome, refreshed snapshot.
 - Extract one typed `server_execution::executor` façade from those real seams. Its preparation overloads perform legacy-authorized maintenance/context shift, draft preparation, prompt reconciliation and cache/speculative initialization; its target/external overloads construct exact `server_batch` values, invoke exact-task-scoped multimodal helpers, execute target/spec work, process mechanical retry views and report complete outcomes around existing sampling/replay/release mechanics. The interface is mechanical and does not yet imply a control commit.
 - Require the legacy planner to name exact prompt-reconciliation members before any STARTED-state mutation.
-- Split the current per-slot coupling: reconcile every selected prompt stream mechanically, return exact iteration-tagged `prompt_reconciliation_outcome` values, publish one global snapshot, then let the unchanged legacy authority choose/grant rows. No target work or unrelated scheduling occurs inside that stage.
+Split the current per-slot coupling: reconcile every selected prompt stream mechanically, return exact iteration-tagged `prompt_reconciliation_outcome` values, publish one global snapshot, then let the unchanged legacy authority choose/grant rows. No target work or unrelated scheduling occurs inside that stage.
+
+Staged reconciliation seam contract (no target work, admission sweep, phase transition, fairness advancement, or unrelated scheduling decision between stages):
+
+```text
+passive raw slot/task/capability facts
+    -> batching proposes exact members requiring reconciliation
+    -> control commits prompt-reconciliation membership
+    -> server_execution and existing owners reconcile mechanically
+    -> tagged reconciled-prompt outcomes are published
+    -> server_inference builds one global ephemeral fact snapshot
+    -> batching proposes exact prompt grants
+    -> control commits the final target batch
+```
 - A mutably prepared live prompt stream must receive at least one legal grant in the resulting target manifest.
 - The legacy intent reserves `1 + effective draft maximum` for each speculative candidate, selects a fitting set, and bulk-prepares only that set.
 - The effective maximum comes from every implementation eligible for that member after scheduler caps; it is not hard-coded to MTP `n_max`.
@@ -516,7 +531,7 @@ None. A single legacy planner remains the sole runtime scheduling authority. `se
 - Add target-manifest block offsets, a contiguous verification prefix and retry metadata that preserves the entire prepared union in the first processed view.
 - Treat replay blocks as mandatory known-size prefix members before selecting fresh drafts; never draft them again.
 - Permit retry to reduce/split only the prompt tail; the complete verification prefix remains indivisible.
-- Implement the explicit oversized-prefix authority path only after consultation resolves the decision above; the executor cannot decide it.
+- Implement the resolved oversized-prefix outcome: if the complete verification prefix cannot fit effective retry capacity, the executor returns a typed `verification_prefix_unfit` result and takes the existing terminal cleanup/error path. The executor never slices, drops, despeculates, restores, or replans. Phase 3 transfers the unfit decision from legacy authority to control, where control can later commit explicit restoration/abort and replacement work.
 - Preserve existing execution order and target-manifest output exactly.
 - Accumulate `batch_view` results mechanically, capture exact stream/block/offset identity before release/reset, finish mandatory post actions, publish one complete `target_batch_outcome`, and wrap the settled turn in one `iteration_completion`. Admission-only and zero-work turns use their explicit completion variants.
 - Compare projected pending work with the finalized legacy target manifest and complete outcome only. The comparator is shadow evidence, never an applying scheduler.
@@ -546,7 +561,7 @@ at their existing call boundaries.
 - Prompt preparation cannot mutate an uncommitted candidate.
 - Retry keeps the complete prepared verification prefix in its first processed view.
 - Retry tests keep that complete prefix intact and partition only the prompt tail.
-- A prefix that cannot fit effective retry capacity invokes the explicit reviewed retry/failure outcome and is never silently sliced.
+- A prefix that cannot fit effective retry capacity returns a typed `verification_prefix_unfit` result and follows the existing terminal cleanup/error path; the executor never slices, drops, despeculates, restores, or replans it.
 - Retry treats a 65-row maximum ngram block as one atomic unit.
 - A prepared speculative stream is never omitted from its iteration's target manifest.
 - Output/logit and NextN rows match target-manifest block membership.
@@ -582,10 +597,10 @@ Admission and MTP activation timing remain in their existing single owners durin
 - Emit `external_target_commit` for the exact multimodal task before direct helper execution; do not expose or independently schedule its internal media chunks/batches.
 - Accumulate `batch_view` results, capture exact identity before release/reset, finish mandatory post actions, and report one complete `target_batch_outcome` without advancing policy in `server_execution`.
 - Delete both temporary legacy planner functions, the shadow comparator, and every legacy target-scheduling interpretation in the same commit:
-  - generating membership/speculative selection;
-  - prompt membership, compatibility-group selection and grants;
-  - context-shift/maintenance authorization chosen directly from `SLOT_STATE_GENERATING`.
-- Retain `SLOT_STATE_*` only for mechanical current-task translation and response/outcome lifecycle. Isolate the sole temporary exception—legacy NORMAL MTP activation timing—behind its explicit fact/outcome seam until Phase 5 removes both activation sites.
+  - generating membership/speculative selection (`tools/server/server-context.cpp:3629-3745`, deleted at Phase 3 takeover);
+  - prompt membership, compatibility-group selection and grants (`tools/server/server-context.cpp:3754-4292`, deleted at Phase 3 takeover);
+  - context-shift/maintenance authorization selected from generating state (`tools/server/server-context.cpp:3546-3612`, deleted at Phase 3 takeover).
+Retain `SLOT_STATE_*` only for mechanical current-task translation and response/outcome lifecycle. The sole temporary exceptions are the two isolated legacy NORMAL MTP activation timings (`tools/server/server-context.cpp:3614-3618` pre_decode maintenance pass and `4512-4518` post_decode prompt-completion transition), isolated behind their explicit fact/outcome seam until Phase 5 removes both atomically. The temporary exception
 
 ### Non-server workstream
 
@@ -599,6 +614,9 @@ invoked only after the new server control commit.
 - No legacy planner, shadow comparator or categorical target-scheduling interpretation remains.
 - Outside the mechanical translator/outcome paths and the isolated Phase 5 MTP-timing exception, no `SLOT_STATE_*` branch selects members, grants, preparation or maintenance.
 - Every NORMAL turn uses one monotonic `iteration_id` with distinct preparation commands and one `target_batch_commit`; only the latter reaches target execution.
+Explicit Phase 3/4 delete-list gate: Phase 3 deletes the exact legacy authority catalogue — generating selection/speculative preparation `tools/server/server-context.cpp:3629-3745`, prompt membership/compatibility/reconciliation/grants `3754-4292`, and context-shift maintenance `3546-3612`. The sole surviving legacy scheduling exception during Phases 3-4 is NORMAL MTP activation timing
+(`try_activate_deferred_mtp` plus its two call sites and their `SLOT_STATE_GENERATING`/`SLOT_MTP_PREFILL_DEFERRED` predicates), with the two temporary MTP exceptions at `3614-3618` and `4512-4518`. Verification: `rg -n "SLOT_STATE_(GENERATING|DONE_PROMPT)" tools/server/server-context.cpp` must show no scheduling-selection branch outside `server_execution` and the isolated MTP-timing exception, so the exception cannot silently widen.
+- Mechanical deletion-commit verification: after Phase 3, no `SLOT_STATE_GENERATING`/`SLOT_STATE_DONE_PROMPT` branch may reach `try_activate_deferred_mtp`, `batch.add`, or `spec_draft` outside `server_execution`.
 - Reconciliation for the complete selected set precedes the global fact snapshot and grant proposal.
 - No phase, admission, fairness or next-work decision consumes a partial batch-view outcome.
 - Threshold remains disabled and NORMAL target manifests match the baseline.
@@ -611,7 +629,7 @@ invoked only after the new server control commit.
 
 ### Rollback
 
-Revert Phase 3 to the Phase 2 legacy seam. After later phases land, rollback must proceed in reverse order first.
+Revert Phase 3 to the Phase 2 legacy seam. After later phases land, rollback must proceed in reverse order first; see `COHORT_ROLLBACK_RUNBOOK.md` for the mandatory per-phase reverse-order steps and verification commands.
 
 ## Phase 4 — Queue leases and atomic admission authority
 
@@ -665,7 +683,7 @@ The FORM bind branch is a dormant contract in Phase 4 and becomes reachable only
 - Keep queue `lease_id` in `server_queue`; neither NORMAL admission nor an aborted lease allocates or supplies a `cohort_id`.
 - Have `server_inference::admission_adapter::apply()` attach and `snapshot_reader` return exact `stream_key` values mechanically. Only control can bind them into an `active_cohort`.
 - Refresh passive exact identity/liveness/dependency facts after attachment, cancellation, release and slot reuse. A new `stream_key` inherits no progress/pending-work projection from the previous task.
-- Treat parent/child activation as a later execution outcome after mechanical state copying, not as an admission decision; publish refreshed facts only after the complete `target_batch_outcome`.
+Treat parent/child activation as a later execution outcome after mechanical state copying, not as an admission decision; publish refreshed facts only after the complete-manifest closure produces the complete `target_batch_outcome`.
 - Support a controller-committed ordered predicate for the oldest ready multimodal task without moving it into a second queue; later INTERMISSION integration binds the attached exact pair as `intermission_task`.
 
 ### Non-server workstream
@@ -702,40 +720,46 @@ Speculative policy remains the eligibility authority. `inference::control` becom
 
 - Admission/spec mode at `server-context.cpp:2876-3026`.
 - `try_activate_deferred_mtp()` at `server-context.cpp:3502-3541`.
-- Independent activation sites at `server-context.cpp:3614-3618`, `4512-4518`.
+Legacy independent activation sites at `server-context.cpp:3614-3618` (pre_decode maintenance pass) and `4512-4518` (post_decode prompt-completion transition), both deleted in this phase. The pre-landed post_decode generating-scan edit already in the working tree must be re-verified against this final Phase 5 design before Phase 5 lands.
 - `server-speculative-policy.*`.
 
 ### Server workstream
 
 - Convert `try_activate_deferred_mtp` into a mechanical NORMAL activation operation with no independent permission decision.
 - Report current NORMAL eligibility/occupancy facts from existing speculative policy.
-- Have batching calculate `mtp_activation_proposal` and control emit `mtp_activation_commit` for the same NORMAL set/order and prompt-completion timing as the current scans.
-- Replace both independent activation decisions atomically with exact activation commands invoking the mechanical operation; do not change NORMAL archive or active-limit semantics.
-- After mechanical activation attempts, report outcomes and refresh eligible masks/maxima before invoking the Phase 3 reservation path.
+- Have batching calculate `mtp_activation_proposal` and control emit `mtp_activation_commit` for the same NORMAL set/order as the current scans, but at the single canonical post_decode generating-scan boundary instead of the legacy pre_decode/prompt-completion timing.
+- Replace both independent activation decisions atomically with exact activation commands invoking the mechanical operation; do not change NORMAL archive or active-limit semantics. Delete both legacy call sites: the pre_decode maintenance pass at `server-context.cpp:3614-3618` and the post_decode prompt-completion transition at `server-context.cpp:4512-4518`.
+- After mechanical activation attempts, report outcomes and refresh eligible masks/maxima before invoking the Phase 3 reservation path. The single post_decode generating scan therefore runs after verification/sampling/post-decode outcomes complete and after any slot releases in that iteration, but before the next iteration's prompt-reservation and debt pricing.
 - Keep runtime eligibility/synchronization, the immutable cohort profile and the post-activation effective reservation input distinct. Activation changes runtime facts and row price, not committed logical progress.
-- Preserve activation-before-`common_speculative_begin()` at NORMAL prompt completion. A later valid first activation from a completed prompt archive uses the existing backfill path without beginning the sequence again.
+- Preserve activation-before-`common_speculative_begin()` at NORMAL prompt completion: after a successful activation commit and mechanical backfill in server_execution, `common_speculative_begin()` is invoked exactly once at the same post_decode boundary. The legacy pre_decode activation skipped `common_speculative_begin()`; the unified generating scan fixes that defect. A later valid first activation from a completed prompt archive uses the existing backfill path without beginning the sequence again.
 - Add no cohort activation, archive, cursor, or scan path in this phase.
 - Specify both NORMAL activation paths:
 
 ```text
-generating scan:
-    raw/runtime facts
+generating scan (post_decode boundary, periodic):
+    raw/runtime facts (after verification/sampling, after slot releases)
         -> batching activation proposal
         -> control activation commit
-        -> mechanical activation attempt
+        -> mechanical activation attempt (backfill in server_execution)
+        -> common_speculative_begin exactly once per newly activated stream
         -> refreshed masks/maxima
-        -> pending-work pricing and reservation
+        -> pending-work pricing and reservation (next iteration)
 
-prompt completion:
+prompt completion (post_decode, via the generating scan):
     prompt target outcome
         -> control activation commit
-        -> mechanical activation attempt
+        -> mechanical activation attempt (backfill)
         -> common_speculative_begin exactly once
         -> sampling/client outcome
         -> complete target_batch_outcome progress refresh
         -> next iteration_id
 ```
 
+The two NORMAL activation paths above are explicit: the periodic generating-scan path runs facts -> control activation commit -> mechanical attempt -> refreshed runtime masks/maxima -> debt pricing/reservation; the prompt-completion path runs prompt target outcome -> control activation commit -> mechanical activation -> `common_speculative_begin()` exactly once -> sampling/client outcome -> quiescent progress refresh -> next iteration lineage. Debt never decides MTP eligibility or activation timing.
+
+The generating scan is periodic: it re-checks DEFERRED slots on every post_decode boundary
+- Capture-memory bound: finalize, or otherwise bound, a DEFERRED slot's hidden-state capture at the post_decode boundary after the prompt-completion transition and/or before each backfill attempt; capture must not remain active across an unbounded number of target-only decode iterations. This matches the capture lifecycle in `MTP_DEFERRED_PREFILL_IMPLEMENTATION_PLAN.md`, where prompt completion finalizes coverage and cancellation/lineage mutation finalize or discard capture rather than letting it grow without bound.
+- Deletion catalogue: legacy call site 1 (`tools/server/server-context.cpp:3614-3618`, pre_decode maintenance pass) and legacy call site 2 (`tools/server/server-context.cpp:4512-4518`, post_decode prompt-completion transition) are both deleted in Phase 5 and replaced by the single post_decode generating scan owned by control. Mechanical backfill remains in server_execution.
 - Preserve NORMAL archive/capture/retry state across the authority transfer.
 - Keep ngram/dynamic selection, NextN, draft algorithms, acceptance, rollback and replay unchanged.
 - Preserve output/logit reservation and per-sequence limits for the exact committed block membership.
@@ -751,14 +775,14 @@ existing contracts and state ownership.
 
 - Only a control commit can call deferred activation.
 - Existing speculative policy determines eligibility without phase authority.
-- NORMAL activation-set order, prompt-completion timing, active-limit decisions, archive outcomes and speculative regression remain unchanged.
+- NORMAL activation-set order, post_decode generating-scan timing, active-limit decisions, archive outcomes and speculative regression remain unchanged.
 - Every NORMAL reservation observes post-activation outcome facts; no successful same-iteration activation can add unreserved verification rows.
 - Pending-work derivation never decides MTP eligibility or activation timing, and no prompt-completion progress fact is published before begin/sampling and the complete `target_batch_outcome`.
-- Both former independent activation decisions are absent; there is no fallback scan.
-
+- Both former independent activation decisions are absent; there is no fallback scan. Only the post_decode generating scan re-evaluates DEFERRED slots, and `common_speculative_begin()` runs exactly once per successfully activated stream at that same boundary.
+- Mechanical deletion-commit verification: after Phase 5, zero runtime references to the two deleted legacy MTP activation call sites remain (grep-verifiable). `rg -n "try_activate_deferred_mtp" tools/server/server-context.cpp` must show only the mechanical NORMAL activation operation invoked under a control commit, with no pre_decode maintenance-pass call site and no post_decode prompt-completion-transition call site.
 ### Rollback
 
-Revert Phase 5 before Phase 4 or Phase 3.
+Revert Phase 5 before Phase 4 or Phase 3; see `COHORT_ROLLBACK_RUNBOOK.md` for the mandatory per-phase reverse-order steps and verification commands.
 
 ## Phase 6 — Cohort runtime integration behind inaccessible paired thresholds
 
@@ -780,7 +804,7 @@ The NORMAL target/admission controller already owns its Phase 3/4 transactions. 
 - Keep mixed active signatures in NORMAL until the conflicting work clears.
 - Exclude aLoRA from cohort membership and treat active aLoRA as a formation blocker.
 - If any attached cohort-capable incumbent has decode-family pending work when `R >= E`, enter `COHORT_ENTRY_DRAIN`, close ordinary inference admission, derive every exact live incumbent from each refreshed post-completion snapshot, and create no shadow drain membership, active cohort, provisional cohort ID, or event-maintained `R` state.
-- Define decode-family pending work as mandatory replay, pending sampled-token evaluation, or fresh speculative verification work. Define prompt-family work as unresolved prompt reconciliation, remaining prompt tokens, or mandatory last-token/logit evaluation. These are derived work predicates, not per-slot phase state.
+Define `decode_family_pending` as mandatory replay, pending sampled-token evaluation, or fresh speculative verification work. Define `prompt_family_pending` as unresolved prompt reconciliation, remaining prompt tokens, or mandatory last-token/logit evaluation. These derived debt predicates replace any categorical `SLOT_STATE_*` phase predicate; they are not per-slot phase state.
 - In `COHORT_ENTRY_DRAIN`, authorize all exact-scope replay/sampled/verification work and no prompt reconciliation or prompt row. Hold partial and newly attached prompts unchanged. A decoder that samples another token remains decode-family pending and continues draining; a completed target iteration does not by itself make FORM eligible.
 - If entry-drain outcomes produce `R <= X`, abandon entry intent without allocating a cohort ID and enter the decode-boundary INTERMISSION/NORMAL decision.
 - If `R > X` and decode-family pending work becomes zero across the complete exact live scope, transition to FORM. If no decode-family work exists at the initial threshold crossing, direct FORM is legal. In both cases, FORM receives prompt-family members only.
@@ -922,10 +946,10 @@ LLAMA_ARG_COHORT_BATCHING_EXIT_THRESHOLD
 
 ### Deletions and checks
 
-- Verify Phase 3 already deleted old opportunistic prompt/decode authority when control took target-work authority.
+Verify Phase 3 already deleted the exact legacy catalogue at `tools/server/server-context.cpp:3629-3745`, `3754-4292`, and `3546-3612`.
 - Verify no scheduling use of `SLOT_STATE_*` remains outside the enumerated mechanical translator and response/outcome branches.
 - Verify Phase 4 already deleted inference promotion from release paths when control took admission authority.
-- Verify Phase 5 already deleted independent MTP activation decisions when control took NORMAL activation-timing authority.
+Verify Phase 5 already deleted both independent legacy MTP activation call sites (`tools/server/server-context.cpp:3614-3618`, `4512-4518`) and replaced them with the single post_decode generating scan.
 - Verify control stores no per-stream progress/pending-work/reconciliation/prepared/replay/physical-position mirror and no event-maintained `R` catalogue.
 - Verify `snapshot_reader` derives no runnable/capable/blocker class, compatibility group, `R`, pending-work selection or grant; verify `admission_adapter` does not assess formation compatibility; verify execution discovers no work or residual allocation.
 - Verify exactly one `server_inference::admission_adapter` owns both placement planning and application for one retained lease-bound transaction, and no second allocator or applier exists.
@@ -998,7 +1022,10 @@ Progress/iteration regression additionally covers:
 - One monotonic `iteration_id` correlating distinct commands/outcomes and exactly one `iteration_completion`, including explicit admission-only, zero-work, model-mutation and terminal-failure variants.
 - No projection/phase/`R`/admission refresh during preparation, retry, or a partial `batch_view`.
 - Exact outcome identity captured before release/reset, including parent copy, cancellation, replay and slot reuse.
-- Exact Phase 3 categorical scheduling deletion and exact Phase 5 removal of both legacy activation sites.
+Exact Phase 3 categorical scheduling deletion and exact Phase 5 removal of both legacy activation sites.
+- Absence of any legacy categorical scheduling interpretation after Phase 3.
+- One iteration lineage through preparation, retry views, target execution, post-decode, and complete outcome.
+- Controller stores no copied prompt, sampled, replay, checkpoint, cache, speculative, or frontier state.
 
 ### Non-server workstream
 
@@ -1040,9 +1067,9 @@ The production decision requires the server authority/regression results, the no
 | --- | --- | --- | --- | --- | --- |
 | 1 | Existing server | Existing server | Existing server | Leaf-pure admission/batching calculations only | No mutable controller or applying adapter exists |
 | 2 | One legacy target-manifest producer | Existing server | Existing server | Legacy producer plus extracted passive/mechanical contracts | No; executor is mechanical and lineage follows legacy authority |
-| 3 | Control `target_batch_commit` / `external_target_commit` for NORMAL | Existing admission path | Existing MTP path | `inference::batching` | No; NORMAL transaction controller lands and legacy producer is deleted |
+| 3 | Control `target_batch_commit` / `external_target_commit` for NORMAL | Existing admission path | Existing MTP path | `inference::batching` | No; NORMAL transaction controller lands and legacy planner is deleted |
 | 4 | Control target commands | Control `admission_commit` | Existing MTP path | Admission and batching | No; queue lease and `admission_adapter` mechanisms land atomically |
-| 5 | Control target commands | Control `admission_commit` | Control `mtp_activation_commit` | Admission, batching, speculative eligibility | No |
+| 5 | Control target commands | Control `admission_commit` | Control `mtp_activation_commit` | Admission, batching, speculative eligibility | No; both legacy MTP activation sites deleted |
 | 6 | Control target/external/model-mutation commands | Control `admission_commit` | NORMAL: control activation command; cohort: immutable profile, no activation | Admission, batching, speculative eligibility | No |
 | 7 | Control target/external/model-mutation commands | Control `admission_commit` | NORMAL: control activation command; cohort: immutable profile, no activation | Same | No; obsolete paths deleted |
 
@@ -1065,7 +1092,7 @@ Implementation does not begin until the architecture review accepts:
 9. Homogeneous cohort speculative profiles: MTP-OFF zero-work semantics, optional all-member MTP-IMMEDIATE, LoRA MTP-OFF, ngram eligibility and safe incumbent demotion.
 10. Worst-case selection-before-bulk-drafting, no new prepared carry-over lifecycle, and mandatory existing replay blocks.
 11. Maximum-eligible speculative accounting and participation-first ngram caps.
-12. The indivisible complete-verification-prefix contract, prompt-tail-only retry partitioning, explicit oversized-prefix retry/failure policy, and preservation of existing speculative post-processing mechanics.
+12. The indivisible complete-verification-prefix contract, prompt-tail-only retry partitioning, the resolved unfit outcome (typed `verification_prefix_unfit` on the existing terminal cleanup/error path when the prefix cannot fit), and preservation of existing speculative post-processing mechanics.
 13. Explicit operation classes during entry/frozen cohorts: immediate service operations, boundary-gated model mutations, individually reviewed slot/cache mutations, and ordinary inference admission.
 14. NORMAL deferred-MTP authority-migration equivalence with no cohort activation lifecycle.
 15. The distinct NORMAL activation/begin and cohort frozen-profile/begin ordering.
