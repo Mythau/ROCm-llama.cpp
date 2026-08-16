@@ -513,15 +513,6 @@ OpenMP/OpenSSL components remain build-environment warnings, not deferred-MTP
 failures. The unrelated untracked `skills/llamacpp-server-test/` directory was
 not staged or modified by this work.
 
-## Deferred work
-
-- Leaseable/rotating NextN output buffers and background DRAM copying.
-- Preservation through context shift or non-contiguous history remapping.
-- Generic multi-completion archive cloning.
-- CPU or alternate-GPU backfill.
-- Disk-persistent hidden archives.
-- Per-client policy overrides.
-
 ## Review rule
 
 Each task receives one implementation review against its stated authority and

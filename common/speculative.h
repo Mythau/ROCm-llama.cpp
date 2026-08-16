@@ -107,6 +107,17 @@ uint32_t common_speculative_draft_mask(const common_speculative * spec);
 uint32_t common_speculative_stateful_mask(const common_speculative * spec);
 uint32_t common_speculative_stateful_synchronized_mask(const common_speculative * spec, llama_seq_id seq_id);
 bool common_speculative_mtp_deferred_supported(const common_speculative * spec);
+
+struct common_speculative_ngram_mod_pool_info {
+    size_t used_entries = 0;
+    size_t capacity_entries = 0;
+    size_t capacity_bytes = 0;
+};
+
+bool common_speculative_get_ngram_mod_pool_info(
+        const common_speculative * spec,
+        common_speculative_ngram_mod_pool_info & info);
+
 void common_speculative_disable_mask(common_speculative * spec, llama_seq_id seq_id, uint32_t mask);
 
 // Admission reset restores the admitted mask; successful deferred MTP

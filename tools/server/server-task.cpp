@@ -1565,6 +1565,10 @@ json server_task_result_metrics::to_json() {
         { "n_draft_verif_steps_total",       n_draft_verif_steps_total },
         { "n_accepted_per_pos_total",        n_accepted_per_pos_total },
 
+        { "ngram_mod_pool_used_entries",     ngram_mod_pool_used_entries },
+        { "ngram_mod_pool_capacity_entries", ngram_mod_pool_capacity_entries },
+        { "ngram_mod_pool_capacity_bytes",   ngram_mod_pool_capacity_bytes },
+
         { "slots",                           slots_data },
     };
 }

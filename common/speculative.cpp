@@ -2656,6 +2656,7 @@ struct common_speculative {
     // v1 serialization supports one stateful implementation.
     common_speculative_impl * impl_stateful;
     common_speculative_impl_draft_mtp * impl_mtp;
+    common_speculative_impl_ngram_mod * impl_ngram_mod;
 
     const uint32_t loaded_mask;
     const uint32_t draft_mask;
@@ -3046,6 +3047,7 @@ common_speculative * common_speculative_init(common_params_speculative & params,
     uint32_t draft_mask  = 0;
     common_speculative_impl * impl_stateful = nullptr;
     common_speculative_impl_draft_mtp * impl_mtp = nullptr;
+    common_speculative_impl_ngram_mod * impl_ngram_mod = nullptr;
     for (const auto & impl : impls) {
         const uint32_t impl_mask = 1u << impl->type;
         loaded_mask |= impl_mask;
@@ -3059,6 +3061,9 @@ common_speculative * common_speculative_init(common_params_speculative & params,
         if (impl->type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP) {
             impl_mtp = static_cast<common_speculative_impl_draft_mtp *>(impl.get());
         }
+        if (impl->type == COMMON_SPECULATIVE_TYPE_NGRAM_MOD) {
+            impl_ngram_mod = static_cast<common_speculative_impl_ngram_mod *>(impl.get());
+        }
     }
 
     auto * result = new common_speculative {
@@ -3067,6 +3072,7 @@ common_speculative * common_speculative_init(common_params_speculative & params,
         /* .impl_last = */ std::vector<common_speculative_impl *>(n_seq, nullptr),
         /* .impl_stateful  = */ impl_stateful,
         /* .impl_mtp       = */ impl_mtp,
+        /* .impl_ngram_mod = */ impl_ngram_mod,
         /* .loaded_mask    = */ loaded_mask,
         /* .draft_mask     = */ draft_mask,
         /* .eligible_masks = */ std::vector<uint32_t>(n_seq, loaded_mask),
@@ -3210,6 +3216,19 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
 
 bool common_speculative_mtp_deferred_supported(const common_speculative * spec) {
     return spec && spec->impl_mtp && spec->impl_mtp->deferred_supported();
+}
+
+bool common_speculative_get_ngram_mod_pool_info(
+        const common_speculative * spec,
+        common_speculative_ngram_mod_pool_info & info) {
+    if (!spec || !spec->impl_ngram_mod) {
+        return false;
+    }
+
+    info.used_entries = spec->impl_ngram_mod->mod.get_used();
+    info.capacity_entries = spec->impl_ngram_mod->mod.size();
+    info.capacity_bytes = spec->impl_ngram_mod->mod.size_bytes();
+    return true;
 }
 
 void common_speculative_mtp_capture_begin(
