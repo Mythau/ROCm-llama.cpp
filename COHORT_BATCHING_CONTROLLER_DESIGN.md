@@ -1338,7 +1338,7 @@ The following assumptions require those controlled experiments:
 These choices remain for user review and are not implementation authorization:
 
 1. Oversized/reduced retry capacity: RESOLVED. If the complete verification prefix cannot fit effective retry capacity, execution returns a typed `verification_prefix_unfit` result and takes the existing terminal cleanup/error path. Execution never slices, drops, despeculates, restores, or replans during this refactor. Phase 3 transfers the unfit decision from legacy authority to control, where control can later commit explicit restoration/abort and replacement work.
-2. Classify each slot/cache mutation operation as immediately serviceable or boundary-gated; no generic non-inference bypass exists.
+2. Slot/cache mutation classification: RESOLVED. IMMEDIATE = {cancellation signalling, metrics, /health, /slots GET, /lora-adapters GET, NEXT_RESPONSE, shutdown signal, reasoning_end (sampler-local)}. BOUNDARY-GATED = {SET_LORA, prompt-cache save/load, /slots save/restore/erase, slot release/purge/context-shift, speculative policy, deferred-MTP backfill, sleep-state model destroy/reload, decode-failure sweep} at boundary {end-of-iteration, controller phase transition, explicit stop/restart}. No generic non-inference bypass exists.
 3. Incumbent embedding/rerank work: RESOLVED. Cohort mode requires a pure inference server. If the server is started with --embedding or --reranking, cohort capability is disabled at startup; the cohort phase machine never engages and embedding/rerank tasks always run in NORMAL. No drain-window or intermission policy for embedding/rerank is needed.
 
 ## Architecture review boundary
