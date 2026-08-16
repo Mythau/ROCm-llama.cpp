@@ -3148,6 +3148,13 @@ private:
                     res->n_draft_verif_steps_total = metrics.n_draft_verif_steps_total;
                     res->n_accepted_per_pos_total  = metrics.n_accepted_per_pos_total;
 
+                    common_speculative_ngram_mod_pool_info ngram_mod_pool;
+                    if (common_speculative_get_ngram_mod_pool_info(spec.get(), ngram_mod_pool)) {
+                        res->ngram_mod_pool_used_entries = ngram_mod_pool.used_entries;
+                        res->ngram_mod_pool_capacity_entries = ngram_mod_pool.capacity_entries;
+                        res->ngram_mod_pool_capacity_bytes = ngram_mod_pool.capacity_bytes;
+                    }
+
                     if (task.metrics_reset_bucket) {
                         metrics.reset_bucket();
                     }
@@ -3490,11 +3497,26 @@ private:
                 break; // stop any further processing
             }
         }
+
+        // all verification/sampling for this iteration is complete - re-evaluate deferred
+        // MTP activation for slots that were denied by the active-streams policy
+        for (auto & slot : slots) {
+            if (slot.state == SLOT_STATE_GENERATING &&
+                    slot.mtp_prefill_mode == SLOT_MTP_PREFILL_DEFERRED) {
+                try_activate_deferred_mtp(slot);
+            }
+        }
     }
 
     void try_activate_deferred_mtp(server_slot & slot) {
         if (slot.mtp_prefill_mode != SLOT_MTP_PREFILL_DEFERRED ||
                 slot.mtp_backfill_blocked || !slot.spec_cycle_idle()) {
+            return;
+        }
+
+        slot.finalize_mtp_archive();
+        if (!slot.mtp_hidden_archive) {
+            slot.mtp_prefill_mode = SLOT_MTP_PREFILL_TARGET_ONLY;
             return;
         }
 
@@ -3504,12 +3526,15 @@ private:
         const uint32_t allowed = server_speculative_allowed_mask(
                 active_streams, common_speculative_loaded_mask(spec.get()), speculative_policy_limits);
         if ((allowed & mtp_mask) == 0) {
-            return;
-        }
-
-        slot.finalize_mtp_archive();
-        if (!slot.mtp_hidden_archive) {
-            slot.mtp_prefill_mode = SLOT_MTP_PREFILL_TARGET_ONLY;
+            // the policy still denies MTP admission - bound the capture by snapshotting it
+            // into the finalized archive, then resume capture with that archive as prefix so
+            // a later activation can backfill through the current target position.
+            const auto info = common_speculative_hidden_archive_get_info(slot.mtp_hidden_archive);
+            common_speculative_mtp_capture_begin(
+                    spec.get(), slot.id, next_mtp_archive_id++,
+                    info.pos_end + 1, std::move(slot.mtp_hidden_archive));
+            slot.mtp_hidden_archive.reset();
+            slot.mtp_capture_active = true;
             return;
         }
 
@@ -3601,12 +3626,6 @@ private:
                 }
 
                 slot.truncated = true;
-            }
-        });
-
-        iterate(slots, [&](server_slot & slot) {
-            if (slot.state == SLOT_STATE_GENERATING) {
-                try_activate_deferred_mtp(slot);
             }
         });
 
@@ -5199,6 +5218,18 @@ void server_routes::init_routes() {
                     {"name",  "n_busy_slots_per_decode"},
                     {"help",  "Average number of busy slots per llama_decode() call"},
                     {"value",  (float) res_task->n_busy_slots_total / std::max((float) res_task->n_decode_total, 1.f)}
+            },{
+                    {"name",  "ngram_mod_pool_used_entries"},
+                    {"help",  "Number of occupied entries in the shared ngram-mod residency pool."},
+                    {"value",  res_task->ngram_mod_pool_used_entries}
+            },{
+                    {"name",  "ngram_mod_pool_capacity_entries"},
+                    {"help",  "Total entry capacity of the shared ngram-mod residency pool."},
+                    {"value",  res_task->ngram_mod_pool_capacity_entries}
+            },{
+                    {"name",  "ngram_mod_pool_capacity_bytes"},
+                    {"help",  "Allocated bytes for the shared ngram-mod residency pool."},
+                    {"value",  res_task->ngram_mod_pool_capacity_bytes}
             }}}
         };
 
@@ -5212,7 +5243,7 @@ void server_routes::init_routes() {
                 const std::string name = metric_def.at("name");
                 const std::string help = metric_def.at("help");
 
-                auto value = json_value(metric_def, "value", 0.);
+                const auto & value = metric_def.at("value");
                 prometheus << "# HELP llamacpp:" << name << " " << help  << "\n"
                             << "# TYPE llamacpp:" << name << " " << type  << "\n"
                             << "llamacpp:"        << name << " " << value << "\n";
