@@ -833,7 +833,7 @@ Define `decode_family_pending` as mandatory replay, pending sampled-token evalua
 - For LoRA-active cohorts, commit MTP-OFF while leaving ngram independently eligible.
 - Require every incumbent LoRA member's MTP lifecycle to reach a safe idle/demotion boundary before cohort freeze.
 - Keep ngram speculation eligible for LoRA-active cohorts.
-- Keep embedding/rerank under the still-open non-cohort decision; do not infer their policy from multimodal.
+- Keep embedding/rerank as NORMAL-only: cohort capability is disabled at startup when --embedding or --reranking is enabled; the cohort phase machine never engages for those tasks and embedding/rerank work always runs in NORMAL. No drain-window or intermission policy for embedding/rerank is needed.
 - After every complete `iteration_completion`/cancellation refresh in `COHORT_ENTRY_DRAIN` and DECODE, derive blockers and `R`; at `R <= X`, abandon entry intent or end the active cohort respectively and enter `COHORT_INTERMISSION` before another target authorization.
 - In INTERMISSION, use one queue-owned cancellation-visible lease to select at most the oldest ready, mechanically placeable multimodal task. Once attached, emit only that task's single-stream `target_batch_commit` or task-scoped `external_target_commit` until it completes/cancels.
 - Hold every partially drained text survivor through INTERMISSION with pending work visible but unauthorized and without prompt/decode preparation, speculative drafting, verification rows or target work.

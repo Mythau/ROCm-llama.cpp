@@ -1012,7 +1012,7 @@ Multimodal prompt processing directly invokes target decode through `server_slot
 
 An incumbent multimodal task finishes under exclusive NORMAL authorization before cohort entry. While cohort policy is in `COHORT_ENTRY_DRAIN`, FORM, PREFILL or DECODE, a queued multimodal task can be admitted only through the one-task decode-boundary INTERMISSION described above; ordinary NORMAL admission remains available outside that interval. Multimodal never executes in `COHORT_ENTRY_DRAIN`, FORM, PREFILL or DECODE and never joins a text cohort.
 
-Embedding and rerank remain NORMAL-only batch work. Their incumbent/queued boundary policy remains in the decision register; the accepted multimodal policy does not silently decide it for them.
+Embedding and rerank remain NORMAL-only batch work. Cohort capability is disabled at startup when --embedding or --reranking is enabled; the cohort phase machine never engages for those tasks. No drain-window or intermission policy for embedding/rerank is needed.
 
 ## Required invariants
 
