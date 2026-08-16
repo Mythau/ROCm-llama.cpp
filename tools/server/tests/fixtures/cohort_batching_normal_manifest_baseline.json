@@ -1,0 +1,403 @@
+{
+  "schema_version": 1,
+  "kind": "source-derived-normal-scheduler-baseline",
+  "repository_base": "91a5c4911c86fa9e8b85fda27be0e6abeb75b574",
+  "capture_mode": "source-derived; no runtime trace or diagnostic instrumentation",
+  "identity_note": "stream_key values are concrete fixture joins of current slot_id and attached task_id; current server_batch carries slot_id only",
+  "iteration_note": "legacy_turn is a synthetic update_slots turn label; iteration_id is unavailable until Phase 2",
+  "capacity_note": "actual_constructed_rows names concrete legacy rows; maximum_possible_rows is a bound, not a reservation; legacy_reserved_rows is null because legacy prepares drafts before constructing actual rows",
+  "adapter_signature_note": "synthetic adapter_index names the exact loaded adapter identity at that ordered position; legacy equality compares ordered adapter pointer identity plus exact scale",
+  "speculative_priority_note": "requested type list order collapses to an enabled bitmask and does not determine execution priority; implementations use the fixed internal order below",
+  "implementation_priority": [
+    "ngram-simple",
+    "ngram-map-k",
+    "ngram-map-k4v",
+    "ngram-mod",
+    "ngram-cache",
+    "draft-simple",
+    "draft-eagle3",
+    "draft-mtp",
+    "draft-dflash",
+    "draft-dspark"
+  ],
+  "source_hashes_sha256": {
+    "tools/server/server-context.cpp": "978bafb3b0c7661c612657a1414169417cae83c76e291aed44b8816f5e3e6eaa",
+    "tools/server/server-queue.cpp": "0834c54cc96e7dc1398fe1bde3aec03a49f307a0e5b67fba846b104d23ea87f4",
+    "tools/server/server-common.cpp": "01fd435f75a8e3e22e1d79c4ad1ba0ffcb6ff3bfc97b05f7fc750aa5de60cf56",
+    "common/common.h": "b972a9fa1e483be8493911b4664d805f7875d95e3e108ee74ec3def2b199af49",
+    "common/speculative.cpp": "65807683db2e995c8ddb6d87ac7bf51d156c11d919720438271a8d998374c72e",
+    "common/speculative.h": "4c2b053e3e55cd67f5a05c79fd99db4c4e435a3ebb371bcf192c3dc2efcf9f30",
+    "common/sampling.cpp": "a38a6624109ce01d317d6c89f5d1ff27c1427fd5934bddcf71c77d922fcf15b2",
+    "src/llama-context.cpp": "d61dddab8a7c6c5f79f9b0baaf781e01536c7c660f09d90b88a12ed9dd8981ea",
+    "src/llama-batch.cpp": "ad804761f4fce4401b310cbb9135c55dcae8942ed6341d644912b8b483a068dc"
+  },
+  "row_kinds": [
+    "sampled_input",
+    "verification_proposal",
+    "prompt_token",
+    "forced_prompt_logits",
+    "embedding_prompt_token",
+    "rerank_prompt_token"
+  ],
+  "block_kinds": [
+    "verification_block"
+  ],
+  "fixtures": [
+    {
+      "id": "target_only_decode",
+      "legacy_turn": "U0",
+      "iteration_id": null,
+      "config": { "n_batch": 8, "continuous_batching": true, "speculation": "none" },
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1000 }, "adapter_signature": [] }
+      ],
+      "rows": [
+        { "offset": 0, "count": 1, "stream_key": { "slot_id": 0, "task_id": 1000 }, "kind": "sampled_input", "output_rows": [0], "actual_constructed_rows": 1, "maximum_possible_rows": 1, "legacy_reserved_rows": null }
+      ],
+      "outcome": "ordinary sample increments lifecycle-valid n_decoded once; request either remains generating or releases on stop",
+      "source": ["tools/server/server-context.cpp:617-676", "tools/server/server-context.cpp:3626-3745", "tools/server/server-context.cpp:4510-4575"]
+    },
+    {
+      "id": "mtp_actual_shorter_than_maximum",
+      "legacy_turn": "U1",
+      "iteration_id": null,
+      "config": { "n_batch": 8, "continuous_batching": true, "eligible_speculation": ["draft-mtp"], "effective_proposal_max": 3 },
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1001 }, "adapter_signature": [] }
+      ],
+      "blocks": [
+        {
+          "block_kind": "verification_block",
+          "offset": 0,
+          "count": 3,
+          "stream_key": { "slot_id": 0, "task_id": 1001 },
+          "atomic": true,
+          "actual_constructed_rows": 3,
+          "actual_proposal_rows": 2,
+          "maximum_possible_rows": 4,
+          "legacy_reserved_rows": null,
+          "rows": [
+            { "offset": 0, "kind": "sampled_input", "output": true },
+            { "offset": 1, "kind": "verification_proposal", "output": true },
+            { "offset": 2, "kind": "verification_proposal", "output": true }
+          ]
+        }
+      ],
+      "outcome": "all actual rows are verified together; acceptance, checkpoint rollback/replay and response emission remain aligned to the block",
+      "source": ["common/common.h:329-331", "common/speculative.cpp:2780-2813", "tools/server/server-context.cpp:3626-3745", "tools/server/server-context.cpp:4577-4701"]
+    },
+    {
+      "id": "ngram_mod_actual_shorter_than_maximum",
+      "legacy_turn": "U2",
+      "iteration_id": null,
+      "config": { "n_batch": 128, "continuous_batching": true, "eligible_speculation": ["ngram-mod"], "effective_proposal_min": 48, "effective_proposal_max": 64, "per_stream_dp_n_max": 64 },
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1002 }, "adapter_signature": [] }
+      ],
+      "row_rule": "ngram-mod raw output is zero or [48,64]; common_speculative_draft then truncates it to per-stream dp.n_max, so final legacy proposal rows can be 1..47 near context/output limits",
+      "raw_implementation_result_rows_allowed": [0, "48..64"],
+      "raw_implementation_result_rows_example": 52,
+      "final_legacy_proposal_rows_allowed": [0, "1..64"],
+      "concrete_example_cap_constraint": "per_stream_dp_n_max >= 64",
+      "blocks": [
+        {
+          "block_kind": "verification_block",
+          "offset": 0,
+          "count": 53,
+          "stream_key": { "slot_id": 0, "task_id": 1002 },
+          "atomic": true,
+          "actual_constructed_rows": 53,
+          "raw_implementation_result_rows": 52,
+          "per_stream_dp_n_max": 64,
+          "final_legacy_proposal_rows": 52,
+          "actual_selected_implementation": "ngram-mod",
+          "maximum_possible_rows": 65,
+          "legacy_reserved_rows": null,
+          "rows": [
+            { "offset": 0, "count": 1, "kind": "sampled_input", "output": true },
+            { "offset": 1, "count": 52, "kind": "verification_proposal", "output": true }
+          ]
+        }
+      ],
+      "outcome": "actual block is indivisible for target post-processing",
+      "source": ["common/common.h:370-375", "common/speculative.cpp:2424-2442", "common/speculative.cpp:2780-2813", "common/speculative.cpp:3393-3397", "tools/server/server-context.cpp:617-635", "tools/server/server-context.cpp:638-676", "tools/server/server-context.cpp:3650-3681"]
+    },
+    {
+      "id": "dynamic_multi_implementation_selection",
+      "legacy_turn": "U2b",
+      "iteration_id": null,
+      "config": {
+        "n_batch": 128,
+        "continuous_batching": true,
+        "requested_types": ["draft-mtp", "ngram-mod"],
+        "eligible_speculation": ["ngram-mod", "draft-mtp"],
+        "implementation_priority": ["ngram-mod", "draft-mtp"],
+        "implementation_proposal_maxima": { "ngram-mod": 64, "draft-mtp": 3 },
+        "effective_proposal_max": 64,
+        "per_stream_dp_n_max": 64
+      },
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1026 }, "adapter_signature": [] }
+      ],
+      "selection": {
+        "ngram-mod": { "raw_implementation_result_rows": 0, "reason": "miss before n_min clears raw result" },
+        "draft-mtp": { "raw_implementation_result_rows": 2, "final_legacy_proposal_rows": 2, "selected_as_impl_last": true }
+      },
+      "blocks": [
+        {
+          "block_kind": "verification_block",
+          "offset": 0,
+          "count": 3,
+          "stream_key": { "slot_id": 0, "task_id": 1026 },
+          "atomic": true,
+          "actual_constructed_rows": 3,
+          "raw_implementation_result_rows": 2,
+          "per_stream_dp_n_max": 64,
+          "final_legacy_proposal_rows": 2,
+          "actual_selected_implementation": "draft-mtp",
+          "maximum_possible_rows": 65,
+          "legacy_reserved_rows": null,
+          "rows": [
+            { "offset": 0, "kind": "sampled_input", "output": true },
+            { "offset": 1, "kind": "verification_proposal", "output": true },
+            { "offset": 2, "kind": "verification_proposal", "output": true }
+          ]
+        }
+      ],
+      "outcome": "requested list order places draft-mtp first but fixed internal priority tries ngram-mod first; maximum possible rows come from ngram-mod while actual constructed rows and lifecycle ownership come from the first nonempty result, draft-mtp, after the per-stream cap",
+      "source": ["common/speculative.cpp:2424-2442", "common/speculative.cpp:2780-2813", "common/speculative.cpp:2936-2963", "common/speculative.cpp:3323-3421", "common/speculative.cpp:3393-3397", "tools/server/server-context.cpp:617-635", "tools/server/server-context.cpp:3626-3745", "tools/server/server-context.cpp:3650-3681"]
+    },
+    {
+      "id": "mixed_decode_and_prompt_continuous",
+      "legacy_turn": "U3",
+      "iteration_id": null,
+      "config": { "n_batch": 8, "continuous_batching": true, "eligible_speculation": ["draft-mtp"], "effective_proposal_max": 3 },
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1003 }, "adapter_signature": [] },
+        { "stream_key": { "slot_id": 1, "task_id": 1004 }, "adapter_signature": [] }
+      ],
+      "blocks": [
+        {
+          "block_kind": "verification_block",
+          "offset": 0,
+          "count": 4,
+          "stream_key": { "slot_id": 0, "task_id": 1003 },
+          "atomic": true,
+          "actual_constructed_rows": 4,
+          "actual_proposal_rows": 3,
+          "maximum_possible_rows": 4,
+          "legacy_reserved_rows": null,
+          "rows": [
+            { "offset": 0, "kind": "sampled_input", "output": true },
+            { "offset": 1, "kind": "verification_proposal", "output": true },
+            { "offset": 2, "kind": "verification_proposal", "output": true },
+            { "offset": 3, "kind": "verification_proposal", "output": true }
+          ]
+        }
+      ],
+      "rows": [
+        { "offset": 4, "count": 4, "stream_key": { "slot_id": 1, "task_id": 1004 }, "kind": "prompt_token", "output_rows": [7], "actual_constructed_rows": 4, "maximum_possible_rows": 4, "legacy_reserved_rows": null }
+      ],
+      "outcome": "decode/verification prefix and prompt tail execute in one logical llama_batch; post_decode samples/verifies the first stream and advances the prompt stream",
+      "source": ["tools/server/server-context.cpp:3620-3779", "tools/server/server-context.cpp:4210-4291", "tools/server/server-context.cpp:4460-4701"]
+    },
+    {
+      "id": "prompt_only_continuous",
+      "legacy_turn": "U4",
+      "iteration_id": null,
+      "config": { "n_batch": 8, "continuous_batching": true, "speculation": "none" },
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1005 }, "adapter_signature": [] },
+        { "stream_key": { "slot_id": 1, "task_id": 1006 }, "adapter_signature": [] }
+      ],
+      "row_rule": "compatible prompt streams append contiguous rows in slot iteration order until logical n_batch is full; only each completed prompt's last row requests output unless need_embd()",
+      "outcome": "partial prompts remain PROCESSING_PROMPT; complete prompts become DONE_PROMPT and sample after their output view",
+      "source": ["tools/server/server-context.cpp:3754-3779", "tools/server/server-context.cpp:4210-4291"]
+    },
+    {
+      "id": "no_continuous_batching_decode_wins",
+      "legacy_turn": "U5",
+      "iteration_id": null,
+      "config": { "n_batch": 8, "continuous_batching": false, "speculation": "none" },
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1007 }, "adapter_signature": [] },
+        { "stream_key": { "slot_id": 1, "task_id": 1008 }, "adapter_signature": [] }
+      ],
+      "rows": [
+        { "offset": 0, "count": 1, "stream_key": { "slot_id": 0, "task_id": 1007 }, "kind": "sampled_input", "output_rows": [0], "actual_constructed_rows": 1, "maximum_possible_rows": 1, "legacy_reserved_rows": null }
+      ],
+      "held": [{ "stream_key": { "slot_id": 1, "task_id": 1008 }, "kind": "prompt_token", "reason": "continuous batching disabled and decode prefix nonempty" }],
+      "source": ["tools/server/server-context.cpp:3742-3756"]
+    },
+    {
+      "id": "no_continuous_batching_prompt_when_prefix_empty",
+      "legacy_turn": "U6",
+      "iteration_id": null,
+      "config": { "n_batch": 8, "continuous_batching": false, "speculation": "none" },
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1009 }, "adapter_signature": [] }
+      ],
+      "row_rule": "prompt rows may fill the logical batch because the decode prefix is empty",
+      "source": ["tools/server/server-context.cpp:3747-3779"]
+    },
+    {
+      "id": "identical_static_lora_batches",
+      "legacy_turn": "U7",
+      "iteration_id": null,
+      "config": { "n_batch": 8, "continuous_batching": true },
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1010 }, "adapter_signature": [{ "adapter_index": 2, "scale": 0.75 }] },
+        { "stream_key": { "slot_id": 1, "task_id": 1011 }, "adapter_signature": [{ "adapter_index": 2, "scale": 0.75 }] }
+      ],
+      "row_rule": "same task type, embedding width and exact ordered LoRA vector permit both streams in one batch",
+      "source": ["tools/server/server-common.cpp:144-156", "tools/server/server-context.cpp:534-540", "tools/server/server-context.cpp:3629-3642", "tools/server/server-context.cpp:3763-3770"]
+    },
+    {
+      "id": "mixed_static_lora_separates",
+      "legacy_turn": "U8",
+      "iteration_id": null,
+      "config": { "n_batch": 8, "continuous_batching": true },
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1012 }, "adapter_signature": [{ "adapter_index": 2, "scale": 0.75 }] },
+        { "stream_key": { "slot_id": 1, "task_id": 1013 }, "adapter_signature": [{ "adapter_index": 2, "scale": 1.0 }] }
+      ],
+      "row_rule": "first selected stream fixes batch compatibility; the unequal signature stream contributes no rows to that batch",
+      "source": ["tools/server/server-common.cpp:144-156", "tools/server/server-context.cpp:534-540", "tools/server/server-context.cpp:3629-3642", "tools/server/server-context.cpp:3763-3770"]
+    },
+    {
+      "id": "alora_invocation_boundary",
+      "legacy_turn": "U9",
+      "iteration_id": null,
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1014 }, "adapter_signature": [{ "adapter_index": 3, "scale": 1.0, "kind": "alora" }] }
+      ],
+      "row_rule": "uncached pre-invocation tokens execute with the adapter scale temporarily zero; prompt filling stops at invocation_start-1 and later work uses the active adapter",
+      "source": ["tools/server/server-context.cpp:2175-2205", "tools/server/server-context.cpp:4145-4157", "tools/server/server-context.cpp:4218-4224"]
+    },
+    {
+      "id": "parent_child_prompt_completion",
+      "legacy_turn": "U10",
+      "iteration_id": null,
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1015 }, "role": "parent", "adapter_signature": [] },
+        { "stream_key": { "slot_id": 1, "task_id": 1016 }, "role": "child", "parent_task_id": 1015, "adapter_signature": [] }
+      ],
+      "row_rule": "parent owns prompt rows; WAIT_OTHER child contributes none; successful parent prompt decode copies context, prompt, sampler and i_batch before post_decode",
+      "outcome": "child becomes DONE_PROMPT and may sample from the copied parent output; it is not independently runnable before the copy",
+      "source": ["tools/server/server-context.cpp:924-941", "tools/server/server-context.cpp:2245-2246", "tools/server/server-context.cpp:3772-3776", "tools/server/server-context.cpp:4434-4453"]
+    },
+    {
+      "id": "cache_checkpoint_and_forced_logits",
+      "legacy_turn": "U11",
+      "iteration_id": null,
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1017 }, "adapter_signature": [] }
+      ],
+      "row_rule": "cache/checkpoint reconciliation chooses n_past; if n_past equals full nonempty prompt, decrement once and emit exactly one forced_prompt_logits row",
+      "outcome": "physical target/draft state may restore or reset; reconciled prompt coverage reflects the chosen n_past and at least one target row is evaluated",
+      "source": ["tools/server/server-context.cpp:3871-4133"]
+    },
+    {
+      "id": "embedding_and_rerank_outputs",
+      "legacy_turn": "U12",
+      "iteration_id": null,
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1018 }, "task_type": "embedding", "adapter_signature": [] },
+        { "stream_key": { "slot_id": 1, "task_id": 1019 }, "task_type": "rerank", "adapter_signature": [] }
+      ],
+      "row_rule": "task types are mechanically incompatible and execute in separate batches; required prompt rows request output and the task releases after send_embedding/send_rerank",
+      "source": ["tools/server/server-context.cpp:518-540", "tools/server/server-context.cpp:4226-4235", "tools/server/server-context.cpp:4494-4508"]
+    },
+    {
+      "id": "multimodal_external_target_operation",
+      "legacy_turn": "U13",
+      "iteration_id": null,
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1020 }, "adapter_signature": [] }
+      ],
+      "external_target_operations": [
+        { "stream_key": { "slot_id": 0, "task_id": 1020 }, "kind": "mtmd_helper_decode_image_chunk", "media_helper_batches": "opaque", "output": "n_tokens_out" }
+      ],
+      "row_rule": "media-helper work is not represented as server_batch token rows; following text chunks may later append prompt rows",
+      "source": ["tools/server/server-context.cpp:943-1032", "tools/server/server-context.cpp:4174-4205"]
+    },
+    {
+      "id": "deferred_mtp_modes",
+      "legacy_turn": "U14",
+      "iteration_id": null,
+      "mode_outcomes": {
+        "immediate": "admitted MTP remains active through prefill",
+        "deferred": "target prefill captures hidden archive and activation may occur after prompt completion before first target-only advance",
+        "target-only": "no MTP capture/backfill rows"
+      },
+      "source": ["tools/server/server-context.cpp:2861-3027", "tools/server/server-context.cpp:3502-3541", "tools/server/server-context.cpp:4093-4113", "common/speculative.cpp:1560-1611", "common/speculative.cpp:3234-3265"]
+    },
+    {
+      "id": "atomic_verification_prefix_retry",
+      "legacy_turn": "U15",
+      "iteration_id": null,
+      "config": { "original_n_batch": 8, "retry_effective_n_batch": 4, "eligible_speculation": ["draft-mtp"], "effective_proposal_max": 3 },
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1021 }, "adapter_signature": [] },
+        { "stream_key": { "slot_id": 1, "task_id": 1022 }, "adapter_signature": [] }
+      ],
+      "blocks": [
+        {
+          "block_kind": "verification_block",
+          "offset": 0,
+          "count": 4,
+          "stream_key": { "slot_id": 0, "task_id": 1021 },
+          "atomic": true,
+          "actual_constructed_rows": 4,
+          "actual_proposal_rows": 3,
+          "maximum_possible_rows": 4,
+          "legacy_reserved_rows": null,
+          "rows": [
+            { "offset": 0, "kind": "sampled_input", "output": true },
+            { "offset": 1, "kind": "verification_proposal", "output": true },
+            { "offset": 2, "kind": "verification_proposal", "output": true },
+            { "offset": 3, "kind": "verification_proposal", "output": true }
+          ]
+        }
+      ],
+      "rows": [
+        { "offset": 4, "count": 4, "stream_key": { "slot_id": 1, "task_id": 1022 }, "kind": "prompt_token", "output_rows": [7], "actual_constructed_rows": 4, "maximum_possible_rows": 4, "legacy_reserved_rows": null }
+      ],
+      "view_rule": "first retry view contains the complete verification prefix [0,4); later views may contain only prompt-tail rows after spec_i_batch clears",
+      "unfit_rule": "if effective capacity is below the complete verification-prefix size, current post_decode throws; never treat partial speculative processing as baseline behavior",
+      "source": ["tools/server/server-context.cpp:3460-3499", "tools/server/server-context.cpp:4409-4416", "tools/server/server-context.cpp:4422-4428", "tools/server/server-context.cpp:4460-4474"]
+    },
+    {
+      "id": "cancel_before_next_turn",
+      "legacy_turn": "U16",
+      "iteration_id": null,
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1023 }, "adapter_signature": [] }
+      ],
+      "event": "cancel task_id 1023 is processed while the queue drains before callback_update_slots",
+      "rows": [],
+      "outcome": "matching attached slot releases and contributes no rows to U16; queued/deferred copies were already removed when cancellation was posted",
+      "source": ["tools/server/server-queue.cpp:22-69", "tools/server/server-queue.cpp:125-168", "tools/server/server-queue.cpp:211-221", "tools/server/server-context.cpp:3053-3062"]
+    },
+    {
+      "id": "context_shift_physical_rewrite",
+      "legacy_turn": "U17",
+      "iteration_id": null,
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1024 }, "adapter_signature": [] }
+      ],
+      "outcome": "target memory and prompt extent remove/shift a middle range, speculative state is demoted, but lifecycle-valid n_decoded does not regress",
+      "source": ["tools/server/server-context.cpp:3543-3611"]
+    },
+    {
+      "id": "speculative_checkpoint_replay",
+      "legacy_turn": "U18",
+      "iteration_id": null,
+      "streams": [
+        { "stream_key": { "slot_id": 0, "task_id": 1025 }, "adapter_signature": [] }
+      ],
+      "outcome": "partial acceptance on an unsupported target rollback path restores target/draft checkpoints, retains accepted tokens in spec_draft, marks spec_is_replay and returns without response-visible double advance; the next turn reuses that lifecycle",
+      "source": ["tools/server/server-context.cpp:3694-3740", "tools/server/server-context.cpp:4577-4675"]
+    }
+  ]
+}
