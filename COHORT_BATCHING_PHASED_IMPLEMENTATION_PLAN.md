@@ -175,7 +175,7 @@ At FORM closure, the existing `server_queue` creates a cancellation-visible `adm
 
 Cancellation or completion shrinks `active_cohort::members` without changing its ID while the cohort remains above its exit threshold. Reaching the lower threshold ends and clears the lifecycle; it does not mutate or reuse the ID. A reused physical slot can only enter a later cohort as a new exact pair under a new cohort ID. `max(task_id)` is not a cohort identity because cancellation changes the live maximum, deferred tasks may be older, and synthetic tasks consume task IDs.
 
-Member order is initial mechanical attachment order. Pruning uses stable erase. Cursor normalization is exact: removal before it decrements it; removal at it leaves that index naming the next survivor; empty membership resets it to zero. The cursor advances to the successor of the last granted stream only with `target_batch_commit`; preparation, retry and outcomes do not advance it. It is never a decode/speculative fairness cursor.
+Member order is initial mechanical attachment order. Pruning uses stable erase. Cursor normalization is exact: removal before it decrements it; removal at it leaves that index naming the next survivor; empty membership resets it to zero. When grants exist, the committed cursor advances to the successor of the first member actually granted, so the batch starting member rotates even when every member receives a grant. With no grant it retains the normalized supplied cursor. Reconciliation, preparation, retry and execution outcomes never advance it; only the later control commit does. It is never a decode/speculative fairness cursor.
 
 `COHORT_ENTRY_DRAIN` does not add a `pending_cohort` membership catalogue. While inference admission is closed, control derives the complete exact live incumbent set from the refreshed passive snapshot at each boundary and asks admission to assess that supplied scope. Persistent exact membership begins only when FORM atomically creates `active_cohort`; this avoids duplicating slot/task lifecycle or formation-compatibility authority.
 
@@ -245,12 +245,17 @@ verification_rows_max = 1 sampled row + effective maximum eligible draft rows
 Capacity pressure preserves decoder participation before dropping members:
 
 ```text
-residual_after_replay = logical_capacity - mandatory_replay_rows
-per_fresh_rows        = floor(residual_after_replay / fresh_decode_members)
-ngram_cap             = min(configured_ngram_max, per_fresh_rows - 1)
+residual_after_replay   = logical_capacity - mandatory_replay_rows
+uncappable_floor(member) = 1 sampled row
+                            + max(effectively allowed MTP maximum,
+                                  effectively allowed other-family maximum,
+                                  0)
+ngram_envelope(member)   = max(uncappable_floor(member), 1 + configured_ngram_max)
 ```
 
-Mandatory replay members already participate and are excluded from the fresh divisor. Distribute residual remainder fairly among fresh members. If the cap is below configured ngram `n_min`, use sampled-token-only decoding for that fresh member/cycle. In cohort decode, inability to fit one sampled row per active decoder is an explicit infeasible-capacity outcome rather than permission to omit members; NORMAL retains its existing selection/fairness order. The per-sequence draft-parameter path must be verified to honor this cap/fallback during implementation. With no replay prefix, `n_batch=32768` and eight fresh streams, no ngram cap is needed.
+Mandatory replay blocks reserve the prefix first. In require-all cohort mode, the sum of fresh-member floors must fit the residual or the proposal is explicitly infeasible with no selected partial set. Max-min water filling then increments the lowest current total allowance toward each member's ngram envelope; stable supplied order breaks ties and remainder assignment. Derive each ngram cap from its final allowance. NORMAL may skip non-fitting fresh members in its caller-supplied fairness order while retaining the mandatory replay prefix.
+
+If ngram is allowed and the allocated cap is below configured `n_min`, use literal sampled-token-only decoding for that member/cycle: exactly one logical row and no MTP, ngram or other-family drafting. This is not merely an ngram disable. The per-sequence draft-parameter path must be verified to honor this cap/fallback during implementation. With no replay prefix, `n_batch=32768` and eight ordinary fresh streams, no ngram cap is needed.
 
 That sampled-only fallback is new controller policy, not a claim about legacy
 NORMAL behavior. The Phase 0 baseline distinguishes ngram-mod's raw zero-or-
@@ -331,7 +336,7 @@ Compile-time direction:
 
 ```text
 identity/profile values
-    -> passive snapshot and outcome DTO headers
+    -> passive snapshot and producer-owned result DTO headers
     -> admission/batching/control contracts
     -> server adapter/executor implementations
     -> server_context driver
@@ -357,7 +362,7 @@ not absorbed into a server phase.
 | Phase | Server workstream | Non-server workstream | Join condition |
 | --- | --- | --- | --- |
 | 0 | Capture server scheduling/target manifests and direct target operations | Capture existing common/runtime outputs without changing them | Baseline fixtures accepted |
-| 1 | Add dormant server-local policy components and tests | None | Dormant policy tests pass |
+| 1 | Add dormant server-local vocabulary and stable leaf-pure proposal calculations | None | Contract and pure-algorithm tests pass; no executable controller exists |
 | 2 | Extract mechanical server execution under legacy authority | None | Legacy target manifests remain identical |
 | 3 | Transfer NORMAL target-work commit authority | None | Every target invocation has a control commit |
 | 4 | Add queue leases and transfer admission authority | None | Cancellation/attachment ownership tests pass |
@@ -430,35 +435,27 @@ Separately committable: yes; additive and runtime dormant.
 
 ### Authority
 
-Runtime authority remains entirely in current server code. New components calculate test-only proposals; `inference::control` commits only simulated test state.
+Runtime authority remains entirely in current server code. Phase 1 introduces no applying or simulated controller. New components contain value vocabulary, passive snapshot/result contracts and stateless leaf-pure proposal calculations only.
 
 ### Server workstream
 
-- Add distinct namespace/file boundaries for value-only identity/profile vocabularies, control, admission, batching, passive snapshot/outcome DTOs, server adapters and server executors. Add no generic types/facts/utils/scheduler bucket.
-- Define strong `identity::stream_key`, `identity::cohort_id`, and monotonic `identity::iteration_id`; define `active_cohort` and `control_state` using those types.
+- Add distinct, server-local namespace/file boundaries for value-only `inference::identity` and `inference::profile`, proposal-only `inference::admission` and `inference::batching`, passive `server_inference` snapshots and producer-owned `server_execution` result vocabulary. Add no generic types/facts/utils/scheduler bucket.
+- Define strong value types for `identity::stream_key`, `identity::cohort_id`, and `identity::iteration_id`. Phase 1 tests type separation; it does not allocate either monotonic ID in a runtime or simulated state machine.
 - Define exact value-based `profile::adapter_signature`, empty base signature, `cohort_mtp_mode { OFF, IMMEDIATE }`, and immutable `cohort_speculative_profile`.
-- Define exact `admission_commit`, `mtp_activation_commit`, `decode_preparation_commit`, `prompt_reconciliation_commit`, `target_batch_commit`, `external_target_commit`, and boundary-only `model_mutation_commit` types. Do not define generic preparation/batch/post-action commands.
-- Define monotonic `iteration_id` correlation across preparation commands, `target_manifest`, `target_batch_commit`, `batch_view` values and complete `target_batch_outcome`. Only `target_batch_commit` or exact `external_target_commit` authorizes target execution.
-- Define control-owned `iteration_completion` variants for target, external, model-mutation, admission-only, zero-work and terminal-failure closure. The mechanical driver fills this contract; only control interprets it.
-- Include `COHORT_INTERMISSION` as the decode-boundary-only phase and make its external commit name one exact multimodal task rather than a media chunk or helper batch.
-- Carry `iteration_id`, active `cohort_id` and exact `stream_key` values through every post-formation cohort command and outcome; NORMAL, `COHORT_ENTRY_DRAIN`, INTERMISSION and pre-bind FORM commands carry no cohort ID but retain iteration/stream identity.
-- Define `server_inference::stream_snapshot` with passive raw lifecycle, task-kind, dependency, adapter/aLoRA and capability facts rather than server-preclassified cohort policy. Do not expose an adapter-computed runnable/capable/blocker boolean.
-- Define semantic ephemeral `(reconciled_prompt_coverage, output_committed_count)` projection, `server_execution::prompt_reconciliation_outcome`, `server_execution::prepared_decode_outcome`, `server_execution::target_batch_outcome`, and batching-owned pending work without adding persistent member state.
-- Define lifecycle gates that project output committed count and sampled input only for the exact current task at legal states; stale reused-slot fields are ignored.
-- Keep runtime speculative eligibility/synchronization, immutable cohort allowed profile and effective post-activation reservation input as distinct facts.
-- Define exact `admission_proposal`, `formation_assessment`, `mtp_activation_proposal`, `decode_preparation_proposal`, `prompt_reconciliation_proposal`, and `target_batch_proposal` types separately from control command types so a proposal cannot be applied accidentally. `formation_assessment` covers one control-supplied exact scope and reports one exact adapter signature, one homogeneous speculative profile, compatibility, and a typed incompatibility reason.
-- Store phase, `next_cohort_id`, `next_iteration_id`, the optional active cohort, and the optional exact `intermission_task` scheduling grant only in control. Store no per-member progress, pending work, reconciliation, prepared block, replay or physical-position mirror.
-- Define an optional resolved policy containing explicit `entry_streams` and `exit_streams`; absence disables cohort mode and no numeric stream threshold appears in control logic.
-- Have `server_inference::snapshot_reader` expose exact passive facts; have control derive `independently_runnable_text`, `cohort_capable`, lifecycle/task blockers, the complete exact formation scope and `R`; have admission alone assess adapter/speculative compatibility for that scope. Do not add an event-maintained counter, duplicate compatibility calculation, or largest-compatible-subset rule.
-- Define `server_inference::admission_adapter` as one component with `plan()` and `apply()` operations over the same lease-bound transaction; its retained reservations are transaction mechanics, not scheduling state.
-- Define one typed `server_execution::executor` façade whose overloads accept only the corresponding control commands and return the corresponding exact outcomes. Do not split execution authority among preparation, target and model-state façade classes.
-- Define the single-producer field catalogue and reject duplicate derivations at interfaces: snapshot reader for passive/lifecycle-gated facts, reconciliation outcome for reconciled coverage, speculative/replay owner for actual blocks, batching for pending work/pricing, admission for formation assessment, and control for scope/blockers/`R`/phase/authorization.
-- Implement deterministic NORMAL and cohort policy tests, worst-case atomic decode reservation/selection, contiguous prompt grants and phase transitions.
-- Implement deterministic phase-neutral pending-work derivation and distinct proposal/authorization tests. An unreconciled member never satisfies the zero-prompt-work barrier.
-- Implement homogeneous adapter/signature and speculative-profile entry proposals plus prompt-only rotation; do not add cohort lane or MTP activation state.
-- Preserve stable initial member order, exact pruning/cursor normalization, and advance prompt fairness only with `target_batch_commit`. Never reuse prompt fairness for decode/speculative selection.
-- Implement maximum-across-eligible-implementations accounting, per-member ngram caps, fair remainder distribution and sampled-only fallback below `n_min`.
-- Keep all interfaces C++17 and server-local.
+- Define passive `server_inference::stream_snapshot` facts for exact task/slot identity, raw lifecycle, exact source operation identity, input kind, embedding width, dependency, adapter/aLoRA state, speculative capabilities, prompt/output observations and physical runtime observations. COMPLETION and INFILL remain distinct operations even when both use token-sequence input; multimodal remains an input kind. The snapshot contains no preclassified runnable/capable/blocker verdict, `R`, phase or scheduling grant.
+- Keep only the exact-stream `prompt_reconciliation_result` vocabulary whose local producer and meaning are already known; it carries no iteration, cohort, closure or execution-lineage claim. Exact pending-work derivation, command/outcome correlation, committed preparation/reconciliation lineage, `server_batch` extraction, `target_manifest`, retry-view correlation and complete target outcomes begin in Phase 2 at the real legacy seams.
+- Record single-producer semantics in types and tests: passive snapshot projection owns lifecycle-gated observations; the reconciliation producer owns its exact-stream result; admission owns complete-scope formation assessment; batching owns compatibility, reservation and row-grant proposals. Phase 1 adds no second derivation or mutable mirror.
+- Implement the lifecycle-gated passive projection for the exact current task. Stale reused-slot output/sample fields are ignored outside their legal lifecycle; prepared/retractable and physical facts remain visibly distinct from committed logical facts.
+- Keep runtime speculative eligibility/synchronization, immutable cohort allowed profile and effective reservation masks as distinct inputs.
+- Implement leaf-pure `admission::assess_formation()` over one caller-supplied trusted, complete, ordered vector of exact stream snapshots. It derives its returned exact ordered keys from that vector and returns the homogeneous adapter signature, homogeneous speculative profile, compatibility and a typed incompatibility reason. It has no parallel key list, missing-member policy, subset selection, `R`, lease, attachment or cohort binding. Effective aLoRA remains a passive fact whose cohort blocker policy belongs to control.
+- Implement leaf-pure NORMAL compatibility grouping from exact raw source operation identity, input kind, embedding width, effective aLoRA state and exact ordered adapter signature. COMPLETION and INFILL are distinct grouping values independent of input kind. The calculation returns a proposal only and owns no fairness or admission state.
+- Implement leaf-pure worst-case decode pricing/selection from logical `n_batch`, effective implementation masks, frozen allowed speculative profile and implementation maxima. Preserve replay-prefix cost; asymmetric per-member uncappable floors; require-all exact-fit/infeasible behavior; max-min total-allocation water filling with stable supplied-order ties; maximum-across-eligible-implementations accounting; derived ngram caps; literal one-row sampled-only fallback below `n_min`; and an explicit all-or-nothing infeasible result with no selectable partial set. NORMAL may skip non-fitting fresh candidates only in its supplied fairness order.
+- Implement leaf-pure contiguous prompt-grant/cursor proposal calculation from stable ordered candidates and a supplied cursor. A non-empty proposal advances past the first member actually granted; an empty proposal retains the normalized supplied cursor. Phase 1 does not store, prune or commit that cursor.
+- Define only already-stable control values: `phase`, resolved paired-threshold `config`, and immutable `active_cohort` shape. Phase 1 defines no command names/shapes, `controller`, `control_state`, `evaluate_boundary()`, cohort binding, intermission quota state, iteration stages/closures, target-manifest construction, executor interface or proposal application.
+- Do not introduce `server_queue` lease values, queue admission methods, placement plans or `server_inference::admission_adapter` in Phase 1. They land together in Phase 4 so queue ownership, cancellation visibility, reservation retention and one-time application are established atomically.
+- Keep all interfaces C++17 and server-local. The Phase 1 target is test-only/dormant and has no source-runtime wiring.
+
+Phase 1 source is limited to `inference-identity.h`, `inference-profile.h`, the value-only `inference-control.h`, `server-inference-snapshot.{h,cpp}`, the result-only `server-execution-outcome.h`, `inference-admission.{h,cpp}`, `inference-batching.{h,cpp}`, and its dormant test/CMake registration. None is listed in `tools/server/CMakeLists.txt` or linked into `llama-server`.
 
 ### Non-server workstream
 
@@ -468,28 +465,24 @@ tests.
 
 ### Untouched
 
-Queue, slots, `server_batch`, speculative code, cache/checkpoints, model execution and responses.
+Existing `server_queue`, live slots, `server_context`, `server_batch`, speculative code, cache/checkpoints, model execution and responses.
 
 ### Gate
 
-- No server runtime calls the new components.
-- Admission/batching have no commit methods or mutable scheduling state.
-- Control state contains no member progress/debt/preparation mirror, and raw fact types contain no pre-decided cohort eligibility or `R`.
-- Dormant tests prove lifecycle-gated stale-field exclusion, monotonic logical progress versus retractable prepared/physical state, and distinct pending/proposed/authorized work.
-- Iteration tests prove strong monotonic identity, distinct command types, one completion per iteration, explicit non-target completion variants, and that only `target_batch_commit`/`external_target_commit` can authorize target execution.
-- Control tests cover every phase transition and exact membership reconciliation.
-- Control tests cover monotonic cohort allocation, atomic identity/adapter-profile/speculative-profile/member/cursor binding, ID stability while membership shrinks above `X`, lifecycle closure at `R <= X`, and separation from task, slot and lease identities.
-- Parameterized threshold tests prove the three classifiers, lifecycle/task blocker behavior, admission-owned complete-scope mixed-signature rejection, `R >= E` entry intent, `R <= X` exit, hysteresis, and absence of duplicate compatibility, largest-compatible-subset or fixed-count behavior.
-- Entry-drain tests prove `R >= E` allocates no cohort ID, holds prompt-family work, drains every exact-scope decoder, rejects FORM while any decode-family work remains, abandons entry at `R <= X`, and binds the first active cohort only in PREFILL after a decoder-free FORM commit.
-- Parent/child tests prove `WAIT_OTHER` children do not count and begin counting only after shared-prompt activation.
-- Multimodal policy tests prove incumbent NORMAL blocking, decode-side-only intermission entry, exact intermission identity binding/clearing, slot-reuse rejection, oldest-task queue ordering, one task per boundary, survivor holding and zero-work bypass when none is ready.
-- Cohort tests contain one exact adapter signature and one exact speculative profile and require only prompt-member rotation.
-- Reservation tests prove selected maxima fit `n_batch`, selected streams alone are prepared, every actual prepared outcome enters the target manifest, and infeasible cohort sampled-row capacity is explicit rather than cursor-driven omission.
-- Tests distinguish MTP 4-row blocks, ngram-mod 65-row blocks and dynamic maximum-eligible reservation.
+- No live server source, existing queue declaration or runtime CMake target calls or contains the new components.
+- No mutable controller, simulated phase machine, command application, iteration closure, manifest builder, queue lease or admission adapter exists in Phase 1.
+- Strong-type and namespace/dependency tests prove task/slot/stream/cohort/iteration identity separation and one-way component dependencies without a monolithic scheduler namespace.
+- Passive projection tests prove lifecycle-gated stale-field exclusion and keep committed logical, retractable prepared and physical observations semantically distinct.
+- Admission tests prove one trusted ordered snapshot scope derives the returned exact ordered keys, homogeneous adapter/speculative assessment, exact ordered signatures, MTP-OFF fallback, and rejection without largest-compatible-subset selection; aLoRA blocker policy is absent from admission.
+- NORMAL compatibility tests cover exact operation identity including COMPLETION versus INFILL, independently from input kind, embedding width, effective aLoRA state and exact adapter signature.
+- Reservation tests prove maxima across only effectively allowed implementations, frozen-profile MTP exclusion, ngram/other mask exclusion, replay-prefix pricing, asymmetric uncappable-floor exact fit, max-min fairness with stable ties, per-member ngram caps, combined-family literal one-row fallback below `n_min`, MTP 4-row and ngram-mod 65-row examples, and explicit infeasible all-or-nothing output.
+- Prompt tests prove contiguous grants, rotation past the first actual grantee, normalized-cursor retention when no work is granted, and no mutable cursor ownership.
+- Accepted phase transitions, exact scopes, thresholds, drain rules, WAIT_OTHER behavior, cohort identity binding and intermission behavior remain architecture truth-table fixtures. They are not executable Phase 1 controller tests; Phase 6 implements and tests them under the runtime authority that owns them.
+- The dormant test target and a Release CPU `llama-server` compile pass with no runtime integration.
 
 ### Rollback
 
-Revert the additive commit.
+Revert the additive contract/test commit. No runtime authority or existing queue declaration moved in this phase.
 
 ## Phase 2 — Mechanical execution extraction under legacy authority
 
@@ -509,10 +502,11 @@ None. A single legacy planner remains the sole runtime scheduling authority. `se
 
 ### Server workstream
 
+- Derive the exact runtime correlation contract from the existing legacy turn: monotonic `iteration_id`, prepared/reconciliation lineage, `batch_view`, `server_batch`, `target_manifest`, complete `target_batch_outcome`, `iteration_completion`, and the non-target completion variants. Replace any provisional Phase 1 DTO shape that the real seam disproves.
 - Move, rather than copy, existing selection into one temporary legacy intent/target-manifest producer.
 - Add `server_inference::snapshot_reader` as the sole passive, history-free translator and a diagnostics-only progress/pending-work comparator. Neither can mutate control, fairness cursors, slots/runtime, the legacy intent, or the finalized target manifest.
 - Reshape `server_context::update_slots()` into the mechanical pump contract without transferring runtime authority yet: snapshot, legacy decision, exact dispatch, complete outcome, refreshed snapshot.
-- Extract one typed `server_execution::executor` façade. Its preparation overloads perform authorized maintenance/context shift, draft preparation, prompt reconciliation and committed cache/speculative initialization; its target/external overloads construct exact `server_batch` values, invoke exact-task-scoped multimodal helpers, execute target/spec work, process mechanical retry views and report complete outcomes around existing sampling/replay/release mechanics.
+- Extract one typed `server_execution::executor` façade from those real seams. Its preparation overloads perform legacy-authorized maintenance/context shift, draft preparation, prompt reconciliation and cache/speculative initialization; its target/external overloads construct exact `server_batch` values, invoke exact-task-scoped multimodal helpers, execute target/spec work, process mechanical retry views and report complete outcomes around existing sampling/replay/release mechanics. The interface is mechanical and does not yet imply a control commit.
 - Require the legacy planner to name exact prompt-reconciliation members before any STARTED-state mutation.
 - Split the current per-slot coupling: reconcile every selected prompt stream mechanically, return exact iteration-tagged `prompt_reconciliation_outcome` values, publish one global snapshot, then let the unchanged legacy authority choose/grant rows. No target work or unrelated scheduling occurs inside that stage.
 - A mutably prepared live prompt stream must receive at least one legal grant in the resulting target manifest.
@@ -542,6 +536,7 @@ at their existing call boundaries.
 ### Gate
 
 - NORMAL target manifests equal Phase 0 fixtures.
+- The extracted identity/lineage/outcome contract is backed by the real legacy producer and executor boundary rather than a simulated Phase 1 controller.
 - The translator/comparator cannot affect membership, grants, preparation, fairness, phase, admission or runtime state.
 - Reconciliation is complete for every named member before the global fact snapshot and legacy grants.
 - Projected pending work explains every finalized legacy row, and every row maps to one pending-work item or exact external operation.
@@ -572,7 +567,9 @@ Admission and MTP activation timing remain in their existing single owners durin
 
 ### Server workstream
 
-- Add `server_inference::snapshot_reader` without host-side cohort classification.
+- Implement the first mutable `inference::control::controller` and iteration protocol for NORMAL target transactions only. It consumes the Phase 2 settled snapshot/outcome boundary, commits exactly one command lineage per turn, constructs `target_manifest` only from matching preparation/reconciliation outcomes, and accepts only the matching complete closure.
+- Store only NORMAL transaction state required to correlate the active iteration, issued preparation/reconciliation commands and expected completion. Do not implement cohort phase transitions, cohort binding, entry drain, intermission quota or FORM state in this phase.
+- Use the Phase 2 `server_inference::snapshot_reader` without host-side cohort classification.
 - Translate passive exact-stream lifecycle/dependency/task-kind/capability facts mechanically; control alone owns runnable/capable/lifecycle-blocker classification, exact scope and `R`. Admission remains the sole formation-compatibility calculator when cohort policy becomes reachable.
 - Group NORMAL work mechanically by task/input compatibility and exact adapter signature, including effective aLoRA state.
 - Derive phase-neutral pending work from the lifecycle-gated progress projection, then calculate NORMAL generation-first and continuous-batching proposals without storing that projection.
@@ -598,6 +595,7 @@ invoked only after the new server control commit.
 ### Gate
 
 - Every target invocation has a control commit.
+- The NORMAL controller rejects a command outside its active iteration, duplicate commands, wrong tagged outcomes, partial/wrong closures and target construction from caller-invented rows.
 - No legacy planner, shadow comparator or categorical target-scheduling interpretation remains.
 - Outside the mechanical translator/outcome paths and the isolated Phase 5 MTP-timing exception, no `SLOT_STATE_*` branch selects members, grants, preparation or maintenance.
 - Every NORMAL turn uses one monotonic `iteration_id` with distinct preparation commands and one `target_batch_commit`; only the latter reaches target execution.
@@ -654,6 +652,7 @@ The FORM bind branch is a dormant contract in Phase 4 and becomes reachable only
 ### Server workstream
 
 - Add nested `lease_id`, `leased_candidate`, and `admission_lease` values inside the existing global `server_queue` ownership domain; do not add a `server_queue` namespace.
+- Add the queue-owned lease values, `placement_plan`, one `server_inference::admission_adapter` `plan()`/`apply()` contract, admission command/outcome lineage and controller admission-transaction state atomically in this phase; none are predeclared as an applying API in Phase 1.
 - Make `post(CANCEL)` invalidate queued, deferred or leased candidates.
 - Restore unaccepted leases in exact relative order.
 - Implement `server_inference::admission_adapter::plan()` to produce one transaction-local exact task-to-slot `placement_plan` and retain its reservations; implement `apply()` to consume that same committed plan without calling slot selection again.
@@ -678,6 +677,7 @@ policy, attachment, and committed initialization ordering.
 ### Gate
 
 - No host-local second candidate queue exists.
+- The admission controller accepts only the boundary-selected queue lease/candidate set and the adapter applies the exact retained placement plan once; no Phase 1 placeholder can bypass or duplicate this authority.
 - Mechanical attachment of an exact pair is the queue-to-slot cancellation ownership cutover. Before attachment, the cancellation-visible lease invalidates a candidate even after control acceptance. After attachment, cancellation is slot-owned; an attached-then-cancelled pair is reported released and excluded before FORM/INTERMISSION binding, or reconciled before the next target authorization if already bound.
 - Queue order and requested-slot/cache-affinity/LRU placement remain mechanically defined.
 - Completion/infill tasks attach only inside committed admission transactions.
@@ -766,10 +766,12 @@ Separately committable: yes.
 
 ### Authority transfer
 
-The already-authoritative control component begins committing `COHORT_ENTRY_DRAIN`, INTERMISSION, FORM, PREFILL and DECODE actions in server integration tests. No new authority is introduced.
+The NORMAL target/admission controller already owns its Phase 3/4 transactions. Phase 6 adds the executable cohort phase policy and makes control the sole owner of `COHORT_ENTRY_DRAIN`, INTERMISSION, FORM, PREFILL and DECODE transitions. This is the first phase containing mutable cohort lifecycle state, threshold/hysteresis decisions, cohort binding or intermission quota state.
 
 ### Server workstream
 
+- Extend control with the single mutable cohort phase machine, monotonic cohort allocation, immutable `active_cohort`, stable prompt cursor and exact intermission-task grant. Phase 1 phase/config/cohort declarations become runtime state only here.
+- Implement and test the accepted architecture truth table here: complete-scope classification, `WAIT_OTHER` exclusion/liveness, configured `E`/`X` hysteresis, decoder-free FORM rule, uniform entry drain, active-member-only PREFILL/DECODE, lower-boundary release, exact one-task intermission and stable cursor pruning/advancement.
 - After one complete NORMAL `iteration_completion`, have control derive `independently_runnable_text`, `cohort_capable`, lifecycle/task blockers, the complete exact entry scope and `R` from the refreshed passive snapshot. Threshold crossing records entry intent only; it never allocates a cohort ID or creates `active_cohort`.
 - Have control submit that complete exact scope to `inference::admission` for the sole adapter/speculative `formation_assessment`, then commit or reject the result without recalculating compatibility or selecting a subset.
 - If an attached multimodal task is live, remain NORMAL and authorize only that exact task until it completes/cancels; re-evaluate cohort entry afterward.
@@ -1036,17 +1038,17 @@ The production decision requires the server authority/regression results, the no
 
 | Phase | Target-work commit | Admission commit | MTP timing commit | Proposal owners | Duplicate authority |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Existing server | Existing server | Existing server | Dormant inference components | No; proposals cannot apply |
-| 2 | One legacy target-manifest producer | Existing server | Existing server | Legacy producer | No; executor is mechanical |
-| 3 | Control `target_batch_commit` / `external_target_commit` | Existing admission path | Existing MTP path | `inference::batching` | No; legacy producer deleted |
-| 4 | Control target commands | Control `admission_commit` | Existing MTP path | Admission and batching | No; queue and `admission_adapter` are mechanisms |
+| 1 | Existing server | Existing server | Existing server | Leaf-pure admission/batching calculations only | No mutable controller or applying adapter exists |
+| 2 | One legacy target-manifest producer | Existing server | Existing server | Legacy producer plus extracted passive/mechanical contracts | No; executor is mechanical and lineage follows legacy authority |
+| 3 | Control `target_batch_commit` / `external_target_commit` for NORMAL | Existing admission path | Existing MTP path | `inference::batching` | No; NORMAL transaction controller lands and legacy producer is deleted |
+| 4 | Control target commands | Control `admission_commit` | Existing MTP path | Admission and batching | No; queue lease and `admission_adapter` mechanisms land atomically |
 | 5 | Control target commands | Control `admission_commit` | Control `mtp_activation_commit` | Admission, batching, speculative eligibility | No |
 | 6 | Control target/external/model-mutation commands | Control `admission_commit` | NORMAL: control activation command; cohort: immutable profile, no activation | Admission, batching, speculative eligibility | No |
 | 7 | Control target/external/model-mutation commands | Control `admission_commit` | NORMAL: control activation command; cohort: immutable profile, no activation | Same | No; obsolete paths deleted |
 
 Non-server source changes occur only in Phase 7 configuration plumbing; Phase 8 performs non-server validation without planned source changes. Neither workstream step acquires target-work, admission, batching, phase-transition or MTP-timing authority outside the server controller.
 
-Phase 2 also contains a non-applying diagnostics comparator, but it owns no proposal application, control mutation, fairness state or runtime mutation. Phase 3 deletes it with the legacy categorical planner.
+Phase 2 also contains a non-applying diagnostics comparator, but it owns no proposal application, control mutation, fairness state or runtime mutation. Phase 3 deletes it with the legacy categorical planner and introduces the first executable NORMAL controller. Phase 4 adds the admission transaction and queue-owned lease/adapter seam. Phase 6 alone adds executable cohort transitions, binding and intermission state.
 
 ## Final approval boundary
 

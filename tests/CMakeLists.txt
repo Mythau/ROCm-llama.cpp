@@ -260,6 +260,20 @@ set_tests_properties(test-thread-safety PROPERTIES FIXTURES_REQUIRED test-downlo
 llama_build_and_test(test-arg-parser.cpp)
 llama_build_and_test(test-model-resolution.cpp)
 llama_build_and_test(test-speculative-control.cpp)
+add_executable(
+    test-cohort-batching-contracts
+    test-cohort-batching-contracts.cpp
+    ${PROJECT_SOURCE_DIR}/tools/server/inference-admission.cpp
+    ${PROJECT_SOURCE_DIR}/tools/server/inference-batching.cpp
+    ${PROJECT_SOURCE_DIR}/tools/server/server-inference-snapshot.cpp
+)
+target_include_directories(
+    test-cohort-batching-contracts
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/tools/server
+)
+target_compile_features(test-cohort-batching-contracts PRIVATE cxx_std_17)
+llama_test(test-cohort-batching-contracts)
 # the test serves its repos from an httplib server, and the library links it privately
 target_link_libraries(test-model-resolution PRIVATE cpp-httplib)
 

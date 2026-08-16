@@ -195,6 +195,8 @@ namespace server_execution {
 }
 ```
 
+The catalogue above is the end-state namespace map, not the Phase 1 source surface. Phase 1 materializes only identity/profile values; `phase`, `config`, and `active_cohort` values; passive raw snapshot plus lifecycle projection DTOs; the producer-owned exact-stream `prompt_reconciliation_result` whose local meaning is already known; and leaf-pure formation, NORMAL compatibility, decode-reservation, and prompt-row-grant proposals. It contains no commands, executor/adapter interface, pending-work or reconciliation selection, prepared/target outcomes, manifest, or execution lineage. Those contracts begin in the later owning phases at the real server seams.
+
 `inference::identity` and `inference::profile` are value-only vocabularies under `tools/server`; they contain no behavior or mutable state and do not imply extraction into `common`. Do not introduce generic buckets such as `inference::types`, `inference::facts`, `inference::utils`, or `inference::scheduler`.
 
 Component authorities are:
@@ -219,13 +221,13 @@ The compile-time direction is one-way:
 
 ```text
 inference::identity / inference::profile
-    -> passive snapshot and outcome DTO headers
+    -> passive snapshot and producer-owned result DTO headers
     -> inference::admission / inference::batching / inference::control contracts
     -> server adapter and executor implementations
     -> server_context mechanical driver
 ```
 
-Snapshot/outcome DTO declarations remain separate from the adapters that consume control commits. Control may include the passive DTO contracts; passive DTO headers never include the controller or executor. This prevents `inference::control` and `server_execution` from including each other.
+Snapshot/result DTO declarations remain separate from the adapters that consume control commits. Control may include those DTO contracts; snapshot/result headers never include the controller or executor. Results are owned by their mechanical producers rather than classified as passive snapshots. This prevents `inference::control` and `server_execution` from including each other.
 
 The runtime flow is:
 
@@ -283,7 +285,7 @@ class controller {
 
 `inference::admission` and `inference::batching` do not own mutable scheduling state. They calculate proposals from facts plus the last committed control state. Heterogeneous adapter lanes are not part of cohort policy, so no cohort lane cursor or lane-fairness state exists. Only `active_cohort::prompt_cursor` is required inside the homogeneous cohort.
 
-`active_cohort::members` remains in initial mechanical attachment order. Pruning uses stable erase and never reorders survivors. `prompt_cursor` is an index into that ordered live vector, normalized after every stable erase: removal before the cursor decrements it; removal at the cursor leaves the index naming the immediate surviving successor; an empty vector resets it to zero. It advances to the successor of the last granted member only when control commits the final `target_batch_commit`, never on reconciliation, preparation, retry, or execution outcome. It is prompt fairness state only and is never reused to choose speculative/decode participation.
+`active_cohort::members` remains in initial mechanical attachment order. Pruning uses stable erase and never reorders survivors. `prompt_cursor` is an index into that ordered live vector, normalized after every stable erase: removal before the cursor decrements it; removal at the cursor leaves the index naming the immediate surviving successor; an empty vector resets it to zero. When grants exist, control commits the successor of the first member actually granted, so the batch starting member rotates even when every member receives a grant. With no grant it retains the normalized supplied cursor. Reconciliation, preparation, retry and execution outcomes never advance it. It is prompt fairness state only and is never reused to choose speculative/decode participation.
 
 `control_state` gains no per-member lifecycle stage, prompt/output frontier, pending-work set, reconciliation flag, sampled token, prepared block, replay flag, cache position, or speculative-runtime mirror. Those values remain authoritative in their existing owners and are projected only for the current decision. `next_iteration_id` allocates a monotonically increasing correlation identity; an iteration itself remains a transient scheduling/execution transaction rather than another persistent controller lifecycle.
 
@@ -346,7 +348,7 @@ These phases express global authorization policy, not a summary of member execut
 
 The server adapters materialize ephemeral fact vectors from authoritative state and pass the aggregate by `const &`. The project targets C++17, so the contract does not require `std::span`. Owning ephemeral vectors are not persistent mirrored state.
 
-Passive raw facts contain exact identity, attachment/liveness, current mechanical lifecycle, task kind, dependency identity/satisfaction, adapter/aLoRA facts, and speculative/cache capability facts. They do not contain an adapter-computed `independently_runnable` or cohort-eligibility boolean. `inference::control` applies the approved eligible-stream predicate to raw facts and derives `R`.
+Passive raw facts contain exact identity, attachment/liveness, current mechanical lifecycle, exact source operation identity, input kind, dependency identity/satisfaction, adapter/aLoRA facts, and speculative/cache capability facts. Source operations such as COMPLETION and INFILL remain distinct even when both consume token-sequence input; multimodal is an input kind, not a fabricated task operation. These facts do not contain an adapter-computed `independently_runnable` or cohort-eligibility boolean. `inference::control` applies the approved eligible-stream predicate to raw facts and derives `R`.
 
 The source has no safe singular stored computed-token frontier. For one exact current task, logical progress is projected as:
 
@@ -478,7 +480,7 @@ struct prompt_reconciliation_proposal {
 struct target_batch_proposal {
     std::vector<uint64_t> decode_block_ids;
     std::vector<std::pair<inference::identity::stream_key, int32_t>> prompt_grants;
-    size_t next_prompt_cursor;
+    size_t proposed_next_cursor;
 };
 }
 ```
@@ -681,17 +683,20 @@ Dynamic speculation reserves against the maximum implementation eligible for tha
 
 ### Participation-first ngram capacity policy
 
-Before excluding a decoder because maximum ngram blocks do not fit, preserve cohort participation by fairly capping each member's ngram proposal budget:
+Mandatory replay blocks reserve the verification prefix first. For every fresh member, batching then computes its uncappable floor:
 
 ```text
-residual_after_replay = logical_capacity - mandatory_replay_rows
-per_fresh_rows        = floor(residual_after_replay / fresh_decode_members)
-ngram_cap             = min(configured_ngram_max, per_fresh_rows - 1)
+residual_after_replay   = logical_capacity - mandatory_replay_rows
+uncappable_floor(member) = 1 sampled row
+                            + max(effectively allowed MTP maximum,
+                                  effectively allowed other-family maximum,
+                                  0)
+ngram_envelope(member)   = max(uncappable_floor(member), 1 + configured_ngram_max)
 ```
 
-Mandatory replay members have already secured participation and are excluded from the fresh divisor. Distribute any residual remainder fairly through the committed fresh-member rotation. If a fresh member's available cap is below configured `n_min`, use sampled-token-only decoding for that member/cycle instead of submitting an invalid undersized ngram proposal. Only if `residual_after_replay` cannot fit one sampled row for every fresh member may batching propose a fair fresh subset; mandatory replay blocks remain selected.
+For a require-all cohort proposal, the summed fresh floors must fit the residual or the proposal is infeasible with no selected partial set. Batching max-min water-fills the remaining logical rows toward the per-member ngram envelopes by incrementing the lowest current total allowance; stable supplied order breaks equal-allocation ties and remainder assignment. Each member's ngram cap is derived from its final allowance. NORMAL instead considers fresh members in the caller-supplied fairness order and may skip a non-fitting member; mandatory replay blocks remain selected first.
 
-This is the desired scheduler policy and must be verified against the actual per-sequence draft-parameter path during implementation. With no replay prefix, `n_batch = 32768` and eight fresh members, `per_fresh_rows = 4096`, so the configured ngram maximum of 64 requires no cap.
+If ngram is allowed and its allocated cap is below configured `n_min`, that member uses sampled-token-only decoding for the cycle: exactly one logical row and no MTP, ngram, or other-family drafting. This literal fallback is applied after allocation; it is not merely an ngram disable that permits another draft family to re-enter through maximum pricing. The per-sequence draft-parameter path must be verified to honor the committed cap and fallback. With no replay prefix, `n_batch = 32768` and eight ordinary fresh streams, the configured ngram maximum of 64 requires no cap.
 
 Reservation and execution rules:
 
@@ -781,7 +786,7 @@ Within the homogeneous cohort:
 4. Give each member one contiguous grant.
 5. If a member finishes early or encounters a mechanical boundary, redistribute only among members not yet visited.
 6. Never revisit a sequence within the same `target_manifest`.
-7. Include the proposed `next_prompt_cursor` with the grant proposal.
+7. Include `proposed_next_cursor`: the successor of the first member actually granted, or the normalized supplied cursor when no grant exists.
 8. Carry the proposed cursor in `target_batch_proposal`; advance the committed cursor only when control emits the corresponding `target_batch_commit`.
 
 The one-span rule keeps target manifests and redistribution deterministic. It also remains compatible with NORMAL deferred-MTP capture at `common/speculative.cpp:1664-1677`, which records one first/last row interval per sequence and asserts if the sequence reappears in a noncontiguous span. Cohort prompt processing performs no deferred-MTP capture.
@@ -805,7 +810,7 @@ Control performs three distinct pure classifications over the complete passive s
 - `cohort_capable`: an independently runnable text stream whose task/model behavior is supported inside cohort mode. Static base/LoRA text can qualify; aLoRA, multimodal, embedding and rerank do not.
 - `cohort_blocker`: attached/running work whose lifecycle or task kind forbids formation even though it is not counted in `R`, including active aLoRA, active multimodal and any still-unreviewed model-state-mutating operation.
 
-`R` is the number of exact attached streams satisfying both `independently_runnable_text` and `cohort_capable`. It is calculated over the whole snapshot, never the largest compatible adapter subset. Control supplies that complete exact scope to `inference::admission`; admission alone calculates whether it has one identical adapter signature and legal homogeneous speculative profile. Mixed active signatures produce an incompatible `formation_assessment` and remain in NORMAL; incompatible streams are never silently omitted to manufacture a qualifying scope.
+`R` is the number of exact attached streams satisfying both `independently_runnable_text` and `cohort_capable`. It is calculated over the whole snapshot, never the largest compatible adapter subset. Control supplies one trusted, complete, ordered vector of exact stream snapshots to `inference::admission`; admission derives the returned ordered stream keys from that same vector and calculates whether it has one identical adapter signature and legal homogeneous speculative profile. It has no parallel key list or missing-member policy. Mixed active signatures produce an incompatible `formation_assessment` and remain in NORMAL; incompatible streams are never silently omitted to manufacture a qualifying scope. Effective aLoRA remains a raw fact and a control-owned cohort blocker, not an admission incompatibility verdict.
 
 `server_inference::snapshot_reader` reports exact passive current-task lifecycle, task-kind, dependency, adapter/aLoRA and capability facts. Control alone classifies lifecycle/task-kind blockers and derives `R`; admission alone assesses profile compatibility for the exact supplied scope; control alone commits entry or exit. There is no event-maintained stream counter or second threshold authority to drift from slot state.
 
@@ -1016,7 +1021,7 @@ Embedding and rerank remain NORMAL-only batch work. Their incumbent/queued bound
 27. A committed cohort atomically binds one monotonic `cohort_id`, its initial ordered `stream_key` values, immutable adapter and speculative profiles, and initial prompt cursor before target work resumes.
 28. Cancellation or completion may shrink `active_cohort::members` without changing its ID while `R > X`; reaching `R <= X` ends and clears that cohort lifecycle.
 29. Queue `lease_id`, task ID, slot ID, `stream_key`, `cohort_id`, and `iteration_id` are never conflated.
-30. An ngram cap below configured `n_min` produces sampled-token-only decoding for that member/cycle.
+30. An allowed ngram cap below configured `n_min` produces exactly one sampled logical row for that member/cycle and suppresses MTP, ngram and other-family drafting.
 31. Under current post-decode mechanics, retry capacity fits the complete prepared verification prefix in the first processed view; no atomic block, including a maximum 65-row ngram block, is sliced.
 32. Cohort entry and exit compare control-derived `R` only against configured `E` and `X`; requests, largest compatible subsets, raw occupied slots and fixed numeric constants are not threshold units.
 33. After the complete `target_batch_outcome` reduces `R` to `X` or below, control ends cohort policy before the next preparation or target batch and preserves surviving streams unchanged through the boundary decision.
@@ -1153,6 +1158,8 @@ Control/admission/batching policy tests:
 
 - Passive raw facts never contain a pre-decided cohort-eligibility/`R` boolean; control deterministically derives the eligible exact set and `R`.
 - Current-task lifecycle gates ignore stale reused-slot `n_decoded`, `sampled` and `has_next_token` during WAIT_OTHER, STARTED, unreconciled/incomplete prompt and DONE_PROMPT-before-sampling states.
+- Admission consumes one trusted complete ordered snapshot vector, derives the same ordered exact keys, and owns no parallel-key or missing-member policy; effective aLoRA blocking remains control-owned.
+- NORMAL compatibility preserves exact source operation identity, including COMPLETION versus INFILL, independently from input kind and multimodal input.
 - Reconciled prompt coverage plus output-committed count remains monotonic for one exact live task while prepared speculative extent retracts and physical prompt/KV positions move independently.
 - Pending work, priced proposals and authorized work remain separate; barriers and INTERMISSION hold visible work without erasing it.
 - NORMAL generation-first behavior.
@@ -1205,7 +1212,8 @@ Control/admission/batching policy tests:
 - MTP reserves 4 rows per maximum block while ngram-mod reserves 65 under current defaults.
 - Eight maximum ngram blocks reserve 520 rows and leave 32248 NORMAL prompt rows at `n_batch=32768`.
 - Dynamic speculation reserves the maximum eligible implementation and reports actual shorter output.
-- Capacity pressure distributes ngram caps fairly and falls back to sampled-only below `n_min`.
+- Capacity pressure prices asymmetric uncappable floors before max-min total-allocation water filling; exact-fit floors preserve all required participants and stable supplied order breaks ties.
+- An allowed ngram cap below `n_min` falls back literally to one sampled row even when MTP or another draft family is otherwise eligible.
 - Cohort formation commits exactly one homogeneous MTP-OFF or MTP-IMMEDIATE profile before cache restore/attachment.
 - MTP-OFF cohorts capture no hidden rows, allocate no deferred archive, perform no activation scan, and emit no MTP verification rows.
 - MTP-IMMEDIATE cohorts apply immediate MTP to every member and include its maximum in reservation from the first decode plan.

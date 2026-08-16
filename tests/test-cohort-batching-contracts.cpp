@@ -1,0 +1,301 @@
+#include "inference-admission.h"
+#include "inference-batching.h"
+#include "inference-control.h"
+
+#ifdef NDEBUG
+#    undef NDEBUG
+#endif
+
+#include <cassert>
+#include <optional>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+using inference::identity::stream_key;
+
+static server_inference::stream_snapshot make_stream(int32_t slot, int64_t task) {
+    server_inference::stream_snapshot result{};
+    result.stream           = { slot, task };
+    result.attached         = true;
+    result.live             = true;
+    result.state            = server_inference::lifecycle::PROMPT;
+    result.kind             = server_inference::task_kind::COMPLETION;
+    result.input            = server_inference::input_kind::TOKEN_SEQUENCE;
+    result.dependency       = { std::nullopt, true };
+    result.speculation      = { 0x0f, 0x0f, 0x0e, 0, true, true, true, true, false, 3, 64, 8 };
+    result.raw_prompt_tokens_total          = 128;
+    result.raw_fresh_verification_candidate = false;
+    return result;
+}
+
+static inference::batching::decode_candidate decode_candidate(
+    int32_t                                                       slot,
+    int64_t                                                       task,
+    int32_t                                                       mtp,
+    int32_t                                                       ngram,
+    int32_t                                                       ngram_min,
+    int32_t                                                       other = 0,
+    uint32_t                                                      eligible = 0x07,
+    std::optional<inference::profile::cohort_speculative_profile> frozen = std::nullopt) {
+    return { { slot, task }, true, 0, mtp, ngram, ngram_min, other, frozen, eligible, 0x01, 0x02, 0x04 };
+}
+
+static void test_identity_control_values() {
+    static_assert(!std::is_same_v<inference::identity::stream_key, inference::identity::cohort_id>);
+    static_assert(!std::is_same_v<inference::identity::cohort_id, inference::identity::iteration_id>);
+
+    const inference::control::config config{ 3, 1 };
+    const inference::control::active_cohort cohort{
+        { 7 },
+        { { { 4, 0.5f } } },
+        { inference::profile::cohort_mtp_mode::OFF, 0x06 },
+        { { 0, 10 }, { 1, 11 } },
+        1,
+    };
+    assert(config.entry_streams == 3 && config.exit_streams == 1);
+    assert(cohort.id.value == 7 && cohort.members[1] == stream_key({ 1, 11 }));
+    assert(cohort.prompt_cursor == 1 && cohort.adapters.ordered[0].scale == 0.5f);
+}
+
+static void test_passive_projection() {
+    auto passive                              = make_stream(2, 20);
+    passive.dependency                        = { 99, false };
+    passive.raw_prompt_tokens_total           = 513;
+    passive.raw_fresh_verification_candidate  = true;
+    passive.raw_mandatory_replay_rows         = 7;
+    passive.raw_target_physical_position      = 111;
+    passive.raw_draft_physical_position       = 108;
+    passive.raw_prepared_speculative_extent   = 3;
+    passive.output_committed_count             = 999;
+    passive.pending_sampled_input              = true;
+    const server_inference::raw_stream_state raw{ passive, 41, true };
+
+    auto projected = server_inference::project_current_task(raw);
+    assert(projected.output_committed_count == 0 && !projected.pending_sampled_input);
+    assert(projected.dependency.parent_task_id == 99 && !projected.dependency.satisfied);
+    assert(projected.raw_prompt_tokens_total == 513 && projected.raw_mandatory_replay_rows == 7);
+    assert(projected.raw_fresh_verification_candidate && projected.raw_prepared_speculative_extent == 3);
+    assert(projected.raw_target_physical_position == 111 && projected.raw_draft_physical_position == 108);
+
+    passive.state = server_inference::lifecycle::DONE_PROMPT_BEFORE_SAMPLE;
+    projected     = server_inference::project_current_task({ passive, 41, true });
+    assert(projected.output_committed_count == 0 && !projected.pending_sampled_input);
+
+    passive.state = server_inference::lifecycle::GENERATING;
+    projected     = server_inference::project_current_task({ passive, 41, true });
+    assert(projected.output_committed_count == 41 && projected.pending_sampled_input);
+
+    passive.live = false;
+    projected    = server_inference::project_current_task({ passive, 41, true });
+    assert(projected.output_committed_count == 0 && !projected.pending_sampled_input);
+
+    passive.live     = true;
+    passive.attached = false;
+    projected       = server_inference::project_current_task({ passive, 41, true });
+    assert(projected.output_committed_count == 0 && !projected.pending_sampled_input);
+}
+
+static inference::admission::formation_assessment assess(
+    const std::vector<server_inference::stream_snapshot> & streams) {
+    return inference::admission::assess_formation(streams);
+}
+
+static void test_admission_assessment() {
+    auto a = make_stream(0, 10);
+    auto b = make_stream(1, 11);
+
+    auto result = assess({ a, b });
+    assert(result.compatible && result.exact_scope == std::vector<stream_key>({ a.stream, b.stream }));
+    assert(result.adapters.ordered.empty());
+    assert(result.speculation.mtp == inference::profile::cohort_mtp_mode::IMMEDIATE);
+
+    const auto base_adapters    = result.adapters;
+    const auto base_speculation = result.speculation;
+    b.alora_active              = true;
+    result                      = assess({ a, b });
+    assert(result.compatible && result.exact_scope == std::vector<stream_key>({ a.stream, b.stream }));
+    assert(result.adapters == base_adapters && result.speculation == base_speculation);
+    b.alora_active = false;
+
+    b.speculation.runtime_synchronized         = false;
+    b.speculation.can_prefill_mtp_from_scratch = false;
+    result                                      = assess({ a, b });
+    assert(result.compatible && result.speculation.mtp == inference::profile::cohort_mtp_mode::OFF);
+
+    a.adapters.ordered = { { 5, 0.25f }, { 7, 1.0f } };
+    b.adapters         = a.adapters;
+    result             = assess({ a, b });
+    assert(result.compatible && result.speculation.mtp == inference::profile::cohort_mtp_mode::OFF);
+    assert(result.speculation.non_mtp_eligible_mask == 0x0e);
+
+    b.adapters.ordered[0].scale = 0.5f;
+    result                      = assess({ a, b });
+    assert(!result.compatible);
+    assert(result.exact_scope == std::vector<stream_key>({ a.stream, b.stream }));
+    assert(result.reason == inference::admission::formation_incompatibility::MIXED_ADAPTER_SIGNATURES);
+
+    a = make_stream(0, 10);
+    b = make_stream(1, 11);
+    a.speculation.non_mtp_available_mask = 0x06;
+    b.speculation.non_mtp_available_mask = 0x0a;
+    result                                = assess({ a, b });
+    assert(result.compatible && result.speculation.non_mtp_eligible_mask == 0x02);
+    a.speculation.non_mtp_required_mask = 0x04;
+    result                              = assess({ a, b });
+    assert(!result.compatible);
+    assert(result.reason == inference::admission::formation_incompatibility::NO_HOMOGENEOUS_SPECULATIVE_PROFILE);
+}
+
+static void test_normal_compatibility() {
+    const inference::profile::adapter_signature adapters{ { { 8, 0.5f }, { 9, 1.0f } } };
+    const inference::batching::normal_compatibility_candidate first{
+        { 0, 10 }, server_inference::task_kind::COMPLETION, server_inference::input_kind::TOKEN_SEQUENCE, 0, false, adapters
+    };
+    auto same = first;
+    same.owner = { 1, 11 };
+
+    std::vector<inference::batching::normal_compatibility_candidate> candidates{ first, same };
+    auto add_mismatch = [&](auto mutate) {
+        auto candidate = first;
+        candidate.owner = { static_cast<int32_t>(candidates.size()), 20 + static_cast<int64_t>(candidates.size()) };
+        mutate(candidate);
+        candidates.push_back(candidate);
+    };
+    add_mismatch([](auto & c) { c.task = server_inference::task_kind::INFILL; });
+    add_mismatch([](auto & c) { c.input = server_inference::input_kind::EMBEDDING; });
+    add_mismatch([](auto & c) { c.embedding_width = 4096; });
+    add_mismatch([](auto & c) { c.effective_alora = true; });
+    add_mismatch([](auto & c) { c.adapters.ordered[0].scale = 0.75f; });
+    add_mismatch([](auto & c) { std::swap(c.adapters.ordered[0], c.adapters.ordered[1]); });
+
+    const auto proposal = inference::batching::propose_normal_compatibility_group(candidates);
+    assert(proposal.members == std::vector<stream_key>({ first.owner, same.owner }));
+    assert(inference::batching::propose_normal_compatibility_group({}).members.empty());
+}
+
+static void test_decode_masks_and_maxima() {
+    using inference::batching::propose_decode_reservations;
+
+    auto proposal = propose_decode_reservations({ decode_candidate(0, 1, 3, 0, 0) }, 32, false);
+    assert(proposal.feasible && proposal.reservations[0].logical_rows == 4);
+    proposal = propose_decode_reservations({ decode_candidate(0, 1, 0, 64, 48) }, 128, false);
+    assert(proposal.reservations[0].logical_rows == 65);
+    proposal = propose_decode_reservations({ decode_candidate(0, 1, 3, 8, 1, 12) }, 64, false);
+    assert(proposal.reservations[0].logical_rows == 13);
+
+    const inference::profile::cohort_speculative_profile mtp_off{
+        inference::profile::cohort_mtp_mode::OFF, 0x06
+    };
+    proposal = propose_decode_reservations({ decode_candidate(0, 1, 20, 0, 0, 2, 0x07, mtp_off) }, 64, true);
+    assert(proposal.reservations[0].logical_rows == 3);
+    proposal = propose_decode_reservations({ decode_candidate(0, 1, 20, 8, 1, 12, 0x01) }, 64, false);
+    assert(proposal.reservations[0].logical_rows == 21);
+    proposal = propose_decode_reservations({ decode_candidate(0, 1, 20, 8, 1, 12, 0x02) }, 64, false);
+    assert(proposal.reservations[0].logical_rows == 9);
+}
+
+static void test_decode_capacity_and_order() {
+    using inference::batching::propose_decode_reservations;
+
+    auto fresh  = decode_candidate(0, 1, 0, 64, 48);
+    auto replay = decode_candidate(1, 2, 0, 0, 0);
+    replay.fresh_candidate      = false;
+    replay.mandatory_replay_rows = 65;
+    auto proposal = propose_decode_reservations({ fresh, replay }, 100, true);
+    assert(proposal.feasible && proposal.reserved_rows == 66);
+    assert(proposal.reservations[0].replay && proposal.reservations[0].logical_rows == 65);
+    assert(proposal.reservations[1].sampled_only_fallback);
+    assert(proposal.reservations[1].effective_ngram_max == 0);
+    assert(proposal.reservations[1].logical_rows == 1);
+
+    proposal = propose_decode_reservations(
+        { decode_candidate(0, 1, 0, 64, 1), decode_candidate(1, 2, 0, 64, 1) }, 11, true);
+    assert(proposal.reservations[0].logical_rows == 6 && proposal.reservations[1].logical_rows == 5);
+    assert(proposal.reservations[0].effective_ngram_max == 5);
+    assert(proposal.reservations[1].effective_ngram_max == 4);
+
+    proposal = propose_decode_reservations(
+        { decode_candidate(0, 1, 0, 0, 0, 0, 0), decode_candidate(1, 2, 0, 0, 0, 7, 0x04) }, 9, true);
+    assert(proposal.feasible && proposal.reserved_rows == 9);
+    assert(proposal.reservations.size() == 2);
+    assert(proposal.reservations[0].logical_rows == 1);
+    assert(proposal.reservations[1].logical_rows == 8);
+
+    proposal = propose_decode_reservations(
+        { decode_candidate(0, 1, 0, 64, 1, 0, 0x02), decode_candidate(1, 2, 0, 64, 1, 7, 0x06) }, 12, true);
+    assert(proposal.feasible && proposal.reserved_rows == 12);
+    assert(proposal.reservations[0].logical_rows == 4);
+    assert(proposal.reservations[0].effective_ngram_max == 3);
+    assert(proposal.reservations[1].logical_rows == 8);
+    assert(proposal.reservations[1].effective_ngram_max == 7);
+
+    proposal = propose_decode_reservations(
+        { decode_candidate(0, 1, 0, 64, 48), decode_candidate(1, 2, 0, 64, 48) }, 96, true);
+    assert(proposal.feasible && proposal.reserved_rows == 2);
+    assert(proposal.reservations[0].sampled_only_fallback);
+    assert(proposal.reservations[1].sampled_only_fallback);
+
+    proposal = propose_decode_reservations({ decode_candidate(0, 1, 3, 64, 48, 8) }, 9, true);
+    assert(proposal.feasible && proposal.reserved_rows == 1);
+    assert(proposal.reservations.size() == 1);
+    assert(proposal.reservations[0].sampled_only_fallback);
+    assert(proposal.reservations[0].effective_ngram_max == 0);
+    assert(proposal.reservations[0].logical_rows == 1);
+
+    replay.mandatory_replay_rows = 7;
+    proposal                     = propose_decode_reservations({ replay }, 6, true);
+    assert(!proposal.feasible && proposal.reservations.empty() && proposal.reserved_rows == 0);
+
+    proposal = propose_decode_reservations(
+        { decode_candidate(0, 1, 3, 0, 0), decode_candidate(1, 2, 3, 0, 0) }, 3, true);
+    assert(!proposal.feasible && proposal.reservations.empty() && proposal.reserved_rows == 0);
+
+    proposal = propose_decode_reservations(
+        { decode_candidate(0, 1, 0, 0, 0, 10), decode_candidate(1, 2, 3, 0, 0) }, 5, false);
+    assert(proposal.feasible && proposal.reservations.size() == 1);
+    assert(proposal.reservations[0].owner == stream_key({ 1, 2 }));
+}
+
+static void test_prompt_grants_and_cursor() {
+    const std::vector<stream_key> members{ { 0, 10 }, { 1, 11 }, { 2, 12 } };
+    std::vector<inference::batching::prompt_candidate> candidates{
+        { members[0], 1 },
+        { members[1], 100 },
+        { members[2], 100 },
+    };
+    auto proposal = inference::batching::propose_contiguous_prompt_grants(members, candidates, 0, 10);
+    assert(proposal.prompt_grants.size() == 3);
+    assert(proposal.prompt_grants[0].rows == 1);
+    assert(proposal.prompt_grants[1].rows == 5);
+    assert(proposal.prompt_grants[2].rows == 4);
+    assert(proposal.proposed_next_cursor == 1);
+
+    candidates = { { members[0], 100 }, { members[1], 100 }, { members[2], 100 } };
+    proposal   = inference::batching::propose_contiguous_prompt_grants(members, candidates, 0, 6);
+    assert(proposal.prompt_grants.size() == 3 && proposal.proposed_next_cursor == 1);
+    for (const auto & grant : proposal.prompt_grants) {
+        assert(grant.rows == 2);
+    }
+
+    candidates = { { members[0], 0 }, { members[1], 10 }, { members[2], 10 } };
+    proposal   = inference::batching::propose_contiguous_prompt_grants(members, candidates, 0, 4);
+    assert(proposal.prompt_grants.size() == 2);
+    assert(proposal.prompt_grants[0].owner == members[1] && proposal.prompt_grants[1].owner == members[2]);
+    assert(proposal.proposed_next_cursor == 2);
+
+    candidates.clear();
+    proposal = inference::batching::propose_contiguous_prompt_grants(members, candidates, 5, 8);
+    assert(proposal.prompt_grants.empty() && proposal.proposed_next_cursor == 2);
+}
+
+int main() {
+    test_identity_control_values();
+    test_passive_projection();
+    test_admission_assessment();
+    test_normal_compatibility();
+    test_decode_masks_and_maxima();
+    test_decode_capacity_and_order();
+    test_prompt_grants_and_cursor();
+    return 0;
+}
