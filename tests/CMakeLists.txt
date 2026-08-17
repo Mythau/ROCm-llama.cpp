@@ -1,5 +1,3 @@
-include("cmake/common.cmake")
-
 llama_add_compile_flags()
 
 function(llama_build source)
@@ -33,14 +31,10 @@ add_executable(
     test-cohort-batching-contracts.cpp
     ${PROJECT_SOURCE_DIR}/tools/server/inference-admission.cpp
     ${PROJECT_SOURCE_DIR}/tools/server/inference-batching.cpp
-    ${PROJECT_SOURCE_DIR}/tools/server/server-execution.cpp
-    ${PROJECT_SOURCE_DIR}/tools/server/server-inference.cpp
     ${PROJECT_SOURCE_DIR}/tools/server/server-inference-snapshot.cpp
-    ${PROJECT_SOURCE_DIR}/tools/server/server-progress-comparator.cpp
 )
 target_include_directories(test-cohort-batching-contracts PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
 target_compile_features(test-cohort-batching-contracts PRIVATE cxx_std_17)
-target_compile_definitions(test-cohort-batching-contracts PRIVATE LLAMA_COHORT_DIAGNOSTICS)
 target_link_libraries(test-cohort-batching-contracts PRIVATE llama llama-common)
 add_test(NAME test-cohort-batching-contracts COMMAND $<TARGET_FILE:test-cohort-batching-contracts>)
 set_property(TEST test-cohort-batching-contracts PROPERTY LABELS main)

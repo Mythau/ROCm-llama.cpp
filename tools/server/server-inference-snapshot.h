@@ -8,9 +8,6 @@
 
 namespace server_inference {
 
-// Raw lifecycle facts: mechanically interpreted slot/task states. They are never
-// re-interpreted as progress, eligibility, R, or pending work.
-
 enum class lifecycle {
     WAIT_OTHER,
     STARTED,
@@ -54,14 +51,10 @@ struct speculative_capabilities {
     int32_t  other_max_draft_rows;
 };
 
-// One post-reconciliation global snapshot: raw liveness/lifecycle/task/dependency/
-// adapter/speculative facts plus the lifecycle-gated projection below. Prepared
-// extent and physical KV/cache positions stay separate raw facts (raw_* members)
-// and must not be re-interpreted as committed progress.
-
 struct stream_snapshot {
     inference::identity::stream_key       stream;
     bool                                  attached;
+    bool                                  live;
     lifecycle                             state;
     task_kind                             kind;
     input_kind                            input;
@@ -78,15 +71,9 @@ struct stream_snapshot {
     int64_t  raw_draft_physical_position;
     int32_t  raw_prepared_speculative_extent;
 
-    // Lifecycle-gated projection. reconciled_prompt_coverage is deliberately absent:
-    // it exists only as the tagged prompt_reconciliation_outcome, never as a passive
-    // read of prompt/KV state.
     uint64_t output_committed_count;
     bool     pending_sampled_input;
 };
-
-// Post-reconciliation raw projection inputs. These are raw facts read after the
-// reconciliation stage settles; project_current_task applies the lifecycle gate.
 
 struct raw_stream_state {
     stream_snapshot passive;
