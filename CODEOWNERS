@@ -5,7 +5,6 @@
 # ggml-org/ggml-cann        : hipudding
 # ggml-org/ggml-cuda        : JohannesGaessler, am17an, IMbackK, ORippler
 # ggml-org/ggml-hexagon     : lhez, max-krasnyansky
-# ggml-org/ggml-metal       : ggerganov
 # ggml-org/ggml-opencl      : lhez, max-krasnyansky
 # ggml-org/ggml-rpc         : rgerganov
 # ggml-org/ggml-sycl        : arthw
@@ -64,7 +63,6 @@
 /ggml/src/ggml-hip/                     @IMbackK
 /ggml/src/ggml-et/                      @marty1885
 /ggml/src/ggml-impl.h                   @ggerganov
-/ggml/src/ggml-metal/                   @ggml-org/ggml-metal
 /ggml/src/ggml-opencl/                  @ggml-org/ggml-opencl
 /ggml/src/ggml-openvino/                @cavusmustafa @wine99
 /ggml/src/ggml-opt.cpp                  @JohannesGaessler

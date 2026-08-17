@@ -92,12 +92,6 @@ set(GGML_BACKEND_DIR "" CACHE PATH "ggml: directory to load dynamic backends fro
 
 # TODO: mark all options as advanced when not GGML_STANDALONE
 
-if (APPLE)
-    set(GGML_METAL_DEFAULT ON)
-else()
-    set(GGML_METAL_DEFAULT OFF)
-endif()
-
 if (CMAKE_CROSSCOMPILING OR DEFINED ENV{SOURCE_DATE_EPOCH})
     message(STATUS "Setting GGML_NATIVE_DEFAULT to OFF")
     set(GGML_NATIVE_DEFAULT OFF)
@@ -218,13 +212,6 @@ option(GGML_VULKAN_MEMORY_DEBUG             "ggml: enable Vulkan memory debug ou
 option(GGML_VULKAN_SHADER_DEBUG_INFO        "ggml: enable Vulkan shader debug info"           OFF)
 option(GGML_VULKAN_VALIDATE                 "ggml: enable Vulkan validation"                  OFF)
 option(GGML_VULKAN_RUN_TESTS                "ggml: run Vulkan tests"                          OFF)
-option(GGML_METAL                           "ggml: use Metal"                                 ${GGML_METAL_DEFAULT})
-option(GGML_METAL_NDEBUG                    "ggml: disable Metal debugging"                   OFF)
-option(GGML_METAL_SHADER_DEBUG              "ggml: compile Metal with -fno-fast-math"         OFF)
-option(GGML_METAL_EMBED_LIBRARY             "ggml: embed Metal library"                       ${GGML_METAL})
-set   (GGML_METAL_MACOSX_VERSION_MIN "" CACHE STRING
-                                            "ggml: metal minimum macOS version")
-set   (GGML_METAL_STD "" CACHE STRING       "ggml: metal standard version (-std flag)")
 option(GGML_OPENMP                          "ggml: use OpenMP"                                ON)
 
 # toolchain for vulkan-shaders-gen
@@ -281,7 +268,6 @@ set(GGML_PUBLIC_HEADERS
     include/ggml-cpp.h
     include/ggml-cuda.h
     include/ggml-opt.h
-    include/ggml-metal.h
     include/ggml-rpc.h
     include/ggml-virtgpu.h
     include/ggml-sycl.h
@@ -292,9 +278,6 @@ set(GGML_PUBLIC_HEADERS
     include/gguf.h)
 
 set_target_properties(ggml PROPERTIES PUBLIC_HEADER "${GGML_PUBLIC_HEADERS}")
-#if (GGML_METAL)
-#    set_target_properties(ggml PROPERTIES RESOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ggml-metal.metal")
-#endif()
 install(TARGETS ggml LIBRARY PUBLIC_HEADER)
 install(TARGETS ggml-base LIBRARY)
 

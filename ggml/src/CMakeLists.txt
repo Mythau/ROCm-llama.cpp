@@ -468,7 +468,6 @@ endif()
 
 ggml_add_backend(CUDA)
 ggml_add_backend(HIP)
-ggml_add_backend(METAL)
 ggml_add_backend(Vulkan)
 
 foreach (target ggml-base ggml)

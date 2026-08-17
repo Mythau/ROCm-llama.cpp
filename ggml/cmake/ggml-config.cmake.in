@@ -63,18 +63,6 @@ if (NOT GGML_SHARED_LIB)
         endif()
     endif()
 
-    if (GGML_METAL)
-        find_library(FOUNDATION_LIBRARY Foundation)
-        find_library(METAL_FRAMEWORK    Metal)
-        find_library(METALKIT_FRAMEWORK MetalKit)
-        if(NOT FOUNDATION_LIBRARY OR NOT METAL_FRAMEWORK OR NOT METALKIT_FRAMEWORK)
-            set(${CMAKE_FIND_PACKAGE_NAME}_FOUND 0)
-            return()
-        endif()
-        set(GGML_METAL_INTERFACE_LINK_LIBRARIES
-            ${FOUNDATION_LIBRARY} ${METAL_FRAMEWORK} ${METALKIT_FRAMEWORK})
-    endif()
-
     if (GGML_OPENCL)
         find_dependency(OpenCL)
         set(GGML_OPENCL_INTERFACE_LINK_LIBRARIES $<LINK_ONLY:OpenCL::OpenCL>)
