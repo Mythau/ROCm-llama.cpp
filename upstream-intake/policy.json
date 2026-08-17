@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "target_ref": "yolo-mainline",
+  "upstream_ref": "upstream/master",
+  "forbidden_prefixes": [
+    ".devops/",
+    ".gemini/",
+    ".github/",
+    ".pi/",
+    "app/",
+    "benches/",
+    "ci/",
+    "docs/",
+    "examples/",
+    "media/",
+    "pocs/",
+    "requirements/",
+    "scripts/",
+    "ggml/src/ggml-blas/",
+    "ggml/src/ggml-cann/",
+    "ggml/src/ggml-et/",
+    "ggml/src/ggml-hexagon/",
+    "ggml/src/ggml-metal/",
+    "ggml/src/ggml-musa/",
+    "ggml/src/ggml-opencl/",
+    "ggml/src/ggml-openvino/",
+    "ggml/src/ggml-rpc/",
+    "ggml/src/ggml-sycl/",
+    "ggml/src/ggml-virtgpu/",
+    "ggml/src/ggml-webgpu/",
+    "ggml/src/ggml-zdnn/",
+    "ggml/src/ggml-zendnn/",
+    "tools/batched-bench/",
+    "tools/cli/",
+    "tools/completion/",
+    "tools/cvector-generator/",
+    "tools/export-lora/",
+    "tools/fit-params/",
+    "tools/gguf-split/",
+    "tools/imatrix/",
+    "tools/parser/",
+    "tools/perplexity/",
+    "tools/results/",
+    "tools/rpc/",
+    "tools/tokenize/",
+    "tools/tts/"
+  ],
+  "forbidden_prefix_exceptions": [
+    "docs/archive/",
+    "docs/speculative.md",
+    "scripts/ui-assets.cmake"
+  ],
+  "restricted_addition_roots": {
+    "src/models/": [
+      "chameleon.cpp",
+      "clip.cpp",
+      "cogvlm.cpp",
+      "deepseek.cpp",
+      "deepseek2.cpp",
+      "deepseek32.cpp",
+      "deepseek4.cpp",
+      "delta-net-base.cpp",
+      "dflash.cpp",
+      "eagle3.cpp",
+      "gemma3.cpp",
+      "gemma3n.cpp",
+      "gemma4.cpp",
+      "granite.cpp",
+      "hunyuan-vl.cpp",
+      "kimi-linear.cpp",
+      "llama-embed.cpp",
+      "llama.cpp",
+      "minicpm.cpp",
+      "models.h",
+      "pockettts.cpp",
+      "qwen.cpp",
+      "qwen2.cpp",
+      "qwen2moe.cpp",
+      "qwen2vl.cpp",
+      "qwen3.cpp",
+      "qwen35.cpp",
+      "qwen35moe.cpp",
+      "qwen3moe.cpp",
+      "qwen3next.cpp",
+      "qwen3tts.cpp",
+      "qwen3vl.cpp",
+      "qwen3vlmoe.cpp",
+      "wavtokenizer-dec.cpp"
+    ],
+    "tools/": [
+      "llama-bench/",
+      "mtmd/",
+      "quantize/",
+      "server/",
+      "ui/",
+      "CMakeLists.txt"
+    ],
+    "tests/": [
+      "CMakeLists.txt",
+      "cmake/",
+      "fixtures/",
+      "gguf-model-data.cpp",
+      "gguf-model-data.h",
+      "python/",
+      "test-arg-parser.cpp",
+      "test-backend-ops.cpp",
+      "test-batch-alloc.cpp",
+      "test-cohort-batching-contracts.cpp",
+      "test-recurrent-state-rollback.cpp",
+      "test-server-forced-spec-replay.cpp",
+      "test-speculative-control.cpp",
+      "testing.h"
+    ]
+  },
+  "low_signal_prefixes": [
+    ".github/",
+    "ci/",
+    "cmake/",
+    "docs/",
+    "requirements/",
+    "tests/"
+  ],
+  "subsystems": {
+    "hip": [
+      "ggml/src/ggml-cuda/",
+      "ggml/src/ggml-hip/"
+    ],
+    "vulkan": [
+      "ggml/src/ggml-vulkan/"
+    ],
+    "server_spec": [
+      "common/speculative",
+      "tests/python/server/",
+      "tools/server/"
+    ],
+    "models_conversion": [
+      "conversion/",
+      "gguf-py/",
+      "src/models/",
+      "tools/mtmd/"
+    ],
+    "ui": [
+      "tools/ui/"
+    ],
+    "build_vendor": [
+      "CMakeLists.txt",
+      "cmake/",
+      "ggml/CMakeLists.txt",
+      "vendor/"
+    ],
+    "core": [
+      "common/",
+      "ggml/include/",
+      "ggml/src/ggml-cpu/",
+      "include/",
+      "src/"
+    ]
+  },
+  "validation": {
+    "hip_build_directory": "build-upstream-intake-hip",
+    "vulkan_build_directory": "build-upstream-intake-vulkan",
+    "amdgpu_targets": "gfx1100;gfx1201",
+    "server_model": "C:/AI/models/Qwen3.6-35B-A3B-Q8_0-mtp.gguf",
+    "server_parallel": 4,
+    "ctx_size": 50176,
+    "prompt_tokens": 8192,
+    "predict_tokens": 4096,
+    "batch_size": 8192,
+    "ubatch_size": 1024
+  }
+}
