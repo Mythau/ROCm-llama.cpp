@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "target_ref": "yolo-mainline",
+  "target_ref": "intake/base-20260818",
   "upstream_ref": "upstream/master",
   "forbidden_prefixes": [
     ".devops/",
