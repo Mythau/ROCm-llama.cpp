@@ -275,6 +275,9 @@ target_include_directories(
         ${PROJECT_SOURCE_DIR}/tools/server
 )
 target_compile_features(test-cohort-batching-contracts PRIVATE cxx_std_17)
+# Diagnostics-only comparator evidence is exercised by the dormant contract
+# tests; the production llama-server target never defines this switch.
+target_compile_definitions(test-cohort-batching-contracts PRIVATE LLAMA_COHORT_DIAGNOSTICS)
 llama_test(test-cohort-batching-contracts)
 # the test serves its repos from an httplib server, and the library links it privately
 target_link_libraries(test-model-resolution PRIVATE cpp-httplib)

@@ -1,5 +1,8 @@
 #include "server-progress-comparator.h"
 
+#include <algorithm>
+#include <string>
+#include <unordered_set>
 #include <cstdint>
 
 namespace server_inference {
@@ -91,6 +94,79 @@ progress_comparison_report progress_comparator::compare(
     return report;
 }
 
+prepared_live_invariant_report progress_comparator::audit_prepared_live(
+        const std::vector<server_execution::prepared_decode_outcome> & prepared,
+        const server_execution::legacy_intent & intent,
+        const server_execution::legacy_target_manifest & manifest) const {
+    prepared_live_invariant_report report;
+
+    std::unordered_set<int32_t> manifest_slots;
+    for (const server_execution::target_manifest_row & row : manifest.rows) {
+        manifest_slots.insert(row.slot_id);
+    }
+
+    std::unordered_set<int32_t> intent_draft_set(intent.drafting_ids.begin(),
+                                                  intent.drafting_ids.end());
+
+    for (const server_execution::prepared_decode_outcome & outcome : prepared) {
+        if (manifest_slots.find(outcome.owner.slot_id) == manifest_slots.end()) {
+            report.all_prepared_in_manifest = false;
+            report.findings.push_back(
+                "prepared slot " + std::to_string(outcome.owner.slot_id) +
+                " absent from finalized manifest");
+        }
+    }
+
+    for (const server_execution::target_manifest_row & row : manifest.rows) {
+        if (!row.is_nextn) {
+            continue;
+        }
+        bool found = false;
+        for (const server_execution::prepared_decode_outcome & outcome : prepared) {
+            if (outcome.owner.slot_id == row.slot_id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            report.no_manifest_omission = false;
+            report.findings.push_back(
+                "NextN block for slot " + std::to_string(row.slot_id) +
+                " has no prepared_decode_outcome");
+        }
+        if (intent_draft_set.find(row.slot_id) == intent_draft_set.end()) {
+            report.bulk_draft_only_intent = false;
+            report.findings.push_back(
+                "NextN block for undrafted slot " + std::to_string(row.slot_id));
+        }
+    }
+
+    return report;
+}
+
+output_nextn_membership_report progress_comparator::audit_output_nextn_membership(
+        const server_execution::legacy_target_manifest & manifest) const {
+    output_nextn_membership_report report;
+
+    for (std::size_t i = 0; i < manifest.rows.size(); i++) {
+        const server_execution::target_manifest_row & row = manifest.rows[i];
+        if (row.logical_rows < 1) {
+            report.all_rows_explained = false;
+            report.findings.push_back(
+                "row " + std::to_string(i) + " has logical_rows < 1");
+        }
+        if (!row.has_output && !row.is_nextn && !row.is_replay) {
+            report.all_rows_explained = false;
+            report.findings.push_back(
+                "row " + std::to_string(i) + " slot " +
+                std::to_string(row.slot_id) +
+                " has no output/nextn/replay flag");
+        }
+    }
+
+    return report;
+}
+
 #else
 
 projected_pending_work project_pending_work(
@@ -103,6 +179,18 @@ progress_comparison_report progress_comparator::compare(
         const server_execution::legacy_target_manifest &,
         const std::optional<server_execution::target_batch_outcome> &) const {
     // Diagnostics compiled out: never publish a projection.
+    return {};
+}
+
+prepared_live_invariant_report progress_comparator::audit_prepared_live(
+        const std::vector<server_execution::prepared_decode_outcome> &,
+        const server_execution::legacy_intent &,
+        const server_execution::legacy_target_manifest &) const {
+    return {};
+}
+
+output_nextn_membership_report progress_comparator::audit_output_nextn_membership(
+        const server_execution::legacy_target_manifest &) const {
     return {};
 }
 

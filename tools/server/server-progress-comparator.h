@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace server_inference {
@@ -59,6 +60,21 @@ struct progress_comparison_report {
     std::vector<outcome_membership_evidence>  outcome_coverage;
 };
 
+// Step 11: prepared-live-stream invariant audit. Diagnostic-only; asserts the
+// four prepared-live-stream invariants as evidence, never enforcing them.
+struct prepared_live_invariant_report {
+    bool all_prepared_in_manifest = true;
+    bool no_manifest_omission     = true;
+    bool bulk_draft_only_intent    = true;
+    std::vector<std::string> findings;
+};
+
+// Step 11: output/logit and NextN rows match target-manifest block membership.
+struct output_nextn_membership_report {
+    bool all_rows_explained = true;
+    std::vector<std::string> findings;
+};
+
 // Post-reconciliation pending-work derivation. PROMPT streams carry prompt
 // decode work; DONE_PROMPT_BEFORE_SAMPLE and GENERATING with pending sampled
 // input carry sampled-input work; GENERATING additionally carries prepared
@@ -76,6 +92,20 @@ public:
             const std::vector<stream_snapshot> & post_reconciliation,
             const server_execution::legacy_target_manifest & manifest,
             const std::optional<server_execution::target_batch_outcome> & complete_outcome) const;
+
+    // Prepared-live-stream invariants (Step 11). Shadow evidence only:
+    //  - every prepared_decode_outcome maps to a manifest block;
+    //  - every manifest block with a prepared stream has a matching outcome;
+    //  - no manifest block's draft membership exceeds the legacy intent's
+    //    drafting set (bulk-draft only the selected set).
+    prepared_live_invariant_report audit_prepared_live(
+            const std::vector<server_execution::prepared_decode_outcome> & prepared,
+            const server_execution::legacy_intent & intent,
+            const server_execution::legacy_target_manifest & manifest) const;
+
+    // Output/logit and NextN rows must match block membership geometry.
+    output_nextn_membership_report audit_output_nextn_membership(
+            const server_execution::legacy_target_manifest & manifest) const;
 };
 
 }  // namespace server_inference

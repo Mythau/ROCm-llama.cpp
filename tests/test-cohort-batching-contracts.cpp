@@ -2,6 +2,7 @@
 #include "inference-batching.h"
 #include "inference-control.h"
 #include "server-execution-outcome.h"
+#include "server-progress-comparator.h"
 
 #ifdef NDEBUG
 #    undef NDEBUG
@@ -163,6 +164,165 @@ static void test_execution_outcomes() {
         iteration, server_execution::terminal_failure_completion{ iteration, "abort_all_slots" },
     };
     assert(std::holds_alternative<server_execution::terminal_failure_completion>(failure_completion.payload));
+}
+
+static server_execution::legacy_intent make_intent(
+        const std::vector<int32_t> & generating,
+        const std::vector<int32_t> & drafting) {
+    server_execution::legacy_intent intent;
+    intent.iteration      = { 42 };
+    intent.generating_ids = generating;
+    intent.drafting_ids   = drafting;
+    return intent;
+}
+
+static server_execution::legacy_target_manifest make_manifest(
+        const std::vector<server_execution::target_manifest_row> & rows,
+        int32_t verification_prefix_rows = 0,
+        int32_t replay_token_count       = 0,
+        int32_t replay_rows              = 0,
+        bool retry_halving_allowed       = false) {
+    server_execution::legacy_target_manifest manifest;
+    manifest.iteration               = { 42 };
+    manifest.rows                    = rows;
+    manifest.verification_prefix_rows = verification_prefix_rows;
+    manifest.replay_token_count      = replay_token_count;
+    manifest.replay_rows             = replay_rows;
+    manifest.retry_halving_allowed   = retry_halving_allowed;
+    return manifest;
+}
+
+static void test_pending_work_projection() {
+    // PROMPT carries prompt decode work; DONE_PROMPT_BEFORE_SAMPLE carries
+    // sampled-input work; GENERATING carries sampled/draft/replay work only
+    // when the corresponding raw facts are present.
+    auto prompt_stream = make_stream(0, 10);
+    prompt_stream.state = server_inference::lifecycle::PROMPT;
+
+    auto done_prompt = make_stream(1, 11);
+    done_prompt.state = server_inference::lifecycle::DONE_PROMPT_BEFORE_SAMPLE;
+
+    auto generating = make_stream(2, 12);
+    generating.state                            = server_inference::lifecycle::GENERATING;
+    generating.pending_sampled_input            = true;
+    generating.raw_prepared_speculative_extent  = 3;
+    generating.raw_mandatory_replay_rows        = 7;
+
+    auto started = make_stream(3, 13);
+    started.state = server_inference::lifecycle::STARTED;
+
+    const auto projection = server_inference::project_pending_work(
+        { prompt_stream, done_prompt, generating, started });
+
+    assert(projection.items.size() == 5);
+    assert(projection.items[0].kind == server_inference::pending_work_item::category::PROMPT);
+    assert(projection.items[0].stream == stream_key({ 0, 10 }));
+    assert(projection.items[1].kind == server_inference::pending_work_item::category::SAMPLED_INPUT);
+    assert(projection.items[2].kind == server_inference::pending_work_item::category::SAMPLED_INPUT);
+    assert(projection.items[3].kind == server_inference::pending_work_item::category::DRAFT);
+    assert(projection.items[4].kind == server_inference::pending_work_item::category::REPLAY);
+
+    // An idle stream carries nothing.
+    auto idle = make_stream(4, 14);
+    idle.state = server_inference::lifecycle::WAIT_OTHER;
+    const auto idle_projection = server_inference::project_pending_work({ idle });
+    assert(idle_projection.items.empty());
+}
+
+static void test_progress_comparator() {
+    const server_inference::progress_comparator comparator;
+
+    // Post-reconciliation snapshot with one generating stream.
+    auto stream = make_stream(2, 12);
+    stream.state                           = server_inference::lifecycle::GENERATING;
+    stream.pending_sampled_input           = true;
+    stream.raw_prepared_speculative_extent = 3;
+
+    const auto manifest = make_manifest({
+        { 0, 4, 2, false, true, true },
+    }, 4, 0, 0, false);
+
+    server_execution::target_batch_outcome outcome;
+    outcome.iteration = { 42 };
+    outcome.results.push_back({
+        { 2, 12 },
+        server_execution::target_execution_result_kind::STREAM_ADVANCED,
+        0,
+        4,
+    });
+
+    // Complete outcome for the same iteration -> published.
+    const auto report = comparator.compare({ stream }, manifest, outcome);
+    assert(report.published);
+    assert(report.row_coverage.size() == 1);
+    assert(report.row_coverage[0].provenance ==
+           server_inference::manifest_row_provenance::source::PENDING_WORK);
+    assert(report.outcome_coverage.size() == 1);
+    assert(report.outcome_coverage[0].manifest_member);
+
+    // Mid-iteration (no complete outcome) -> never published.
+    const auto mid = comparator.compare({ stream }, manifest, std::nullopt);
+    assert(!mid.published);
+    assert(mid.row_coverage.empty() && mid.outcome_coverage.empty());
+
+    // Mismatched iteration -> never published.
+    server_execution::target_batch_outcome wrong_iteration = outcome;
+    wrong_iteration.iteration = { 43 };
+    const auto mismatched = comparator.compare({ stream }, manifest, wrong_iteration);
+    assert(!mismatched.published);
+
+    // Manifest row from an unprepared slot is UNEXPLAINED.
+    const auto unexplained_manifest = make_manifest({
+        { 0, 4, 99, false, true, false },
+    }, 4, 0, 0, false);
+    const auto unexplained = comparator.compare({ stream }, unexplained_manifest, outcome);
+    assert(unexplained.published);
+    assert(unexplained.row_coverage[0].provenance ==
+           server_inference::manifest_row_provenance::source::UNEXPLAINED);
+}
+
+static void test_prepared_live_invariants() {
+    const server_inference::progress_comparator comparator;
+
+    const auto intent = make_intent({ 2 }, { 2 });
+    const auto manifest = make_manifest({
+        { 0, 4, 2, false, true, true },
+    }, 4, 0, 0, false);
+
+    const std::vector<server_execution::prepared_decode_outcome> prepared{
+        { { 42 }, 9, { 2, 12 }, 4, server_execution::decode_block_origin::FRESH },
+    };
+
+    auto report = comparator.audit_prepared_live(prepared, intent, manifest);
+    assert(report.all_prepared_in_manifest);
+    assert(report.no_manifest_omission);
+    assert(report.bulk_draft_only_intent);
+    assert(report.findings.empty());
+
+    // A prepared outcome not in the manifest fails the first invariant.
+    const std::vector<server_execution::prepared_decode_outcome> stray_prepared{
+        { { 42 }, 9, { 5, 15 }, 4, server_execution::decode_block_origin::FRESH },
+    };
+    report = comparator.audit_prepared_live(stray_prepared, intent, manifest);
+    assert(!report.all_prepared_in_manifest);
+
+    // A NextN manifest block with no prepared outcome fails the second.
+    report = comparator.audit_prepared_live({}, intent, manifest);
+    assert(!report.no_manifest_omission);
+
+    // A NextN block for a non-drafted slot fails the third.
+    const auto undrafted_intent = make_intent({ 2 }, {});
+    report = comparator.audit_prepared_live(prepared, undrafted_intent, manifest);
+    assert(!report.bulk_draft_only_intent);
+
+    // Output/NextN membership geometry.
+    auto membership = comparator.audit_output_nextn_membership(manifest);
+    assert(membership.all_rows_explained);
+    const auto bad_manifest = make_manifest({
+        { 0, 4, 2, false, false, false },
+    }, 4, 0, 0, false);
+    membership = comparator.audit_output_nextn_membership(bad_manifest);
+    assert(!membership.all_rows_explained);
 }
 
 static inference::admission::formation_assessment assess(
@@ -363,6 +523,9 @@ int main() {
     test_identity_control_values();
     test_passive_projection();
     test_execution_outcomes();
+    test_pending_work_projection();
+    test_progress_comparator();
+    test_prepared_live_invariants();
     test_admission_assessment();
     test_normal_compatibility();
     test_decode_masks_and_maxima();
