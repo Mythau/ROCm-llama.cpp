@@ -36,4 +36,20 @@ void executor::prepare_target_context(
         const legacy_authority_token &,
         server_batch &) {}
 
+target_batch_outcome executor::execute_target_manifest(
+        const legacy_authority_token &,
+        const legacy_target_manifest &,
+        llama_context *,
+        server_batch &,
+        std::vector<server_slot> &) {
+    return target_batch_outcome{};
+}
+
+int executor::external_execute_mtmd(
+        const legacy_scoped_mtmd_authorization &,
+        std::vector<server_slot> &,
+        server_batch &) {
+    return -1;
+}
+
 }  // namespace server_execution

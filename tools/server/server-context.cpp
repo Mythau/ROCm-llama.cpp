@@ -30,6 +30,7 @@
 #include <memory>
 #include <filesystem>
 #include <utility>
+#include <unordered_map>
 #include <fstream>
 
 // fix problem with std::min and std::max
@@ -1180,6 +1181,14 @@ private:
     std::vector<server_speculative_policy_limit> speculative_policy_limits;
     uint64_t next_mtp_archive_id = 1;
     uint64_t current_iteration = 0;
+
+    // Phase 2 Steps 8-9: mechanical per-turn outcome capture.
+    // Accumulates per-view stream facts tagged with the current
+    // iteration_id; consumed by update_slots() to emit exactly one
+    // iteration_completion after all views settle. Correlation only:
+    // the legacy planner remains the sole scheduling authority.
+    server_execution::target_batch_outcome target_outcome;
+    bool target_outcome_active = false;
 
 
     bool add_bos_token = true;
@@ -3448,6 +3457,12 @@ private:
         const server_execution::legacy_authority_token legacy_auth{};
         (void) legacy_auth;
 
+        // Phase 2 Step 9: begin per-turn mechanical outcome capture.
+        // Correlation only — the legacy planner remains sole authority.
+        target_outcome.iteration = { current_iteration };
+        target_outcome.results.clear();
+        target_outcome_active = true;
+
         try {
             scoped_timer t(t_pre_decode, n_pre_decode);
             pre_decode();
@@ -3517,6 +3532,18 @@ private:
                 abort_all_slots("post_decode() failed: " + std::string(e.what()));
                 break; // stop any further processing
             }
+        }
+
+        // Phase 2 Step 9: publish exactly one iteration_completion for the turn.
+        // After all views and mandatory post actions settle.
+        if (target_outcome_active) {
+            const server_execution::iteration_completion completion{
+                { current_iteration },
+                std::move(target_outcome),
+            };
+            (void) completion;
+            target_outcome.results.clear();
+            target_outcome_active = false;
         }
 
         // all verification/sampling for this iteration is complete - re-evaluate deferred
@@ -3788,6 +3815,98 @@ private:
     server_execution::legacy_target_manifest finalize_legacy_target_manifest(const server_execution::legacy_intent & intent) {
         server_execution::legacy_target_manifest manifest;
         manifest.iteration = intent.iteration;
+
+        // Phase 2 Step 7: populate the manifest from the real legacy seams.
+        // Walk the constructed batch's block rows and slot state to fill
+        // per-block offsets, logical rows, slot identity, replay/output/nextn
+        // membership, the contiguous verification prefix, and retry metadata.
+        // This records only — it changes no decisions.
+
+        const auto & tokens = batch.tokens;
+        if (tokens.empty()) {
+            return manifest;
+        }
+
+        // Build a per-slot pointer map for quick lookup.
+        std::unordered_map<int32_t, const server_slot *> slot_by_id;
+        for (const auto & s : slots) {
+            slot_by_id[s.id] = &s;
+        }
+
+        int32_t idx = 0;
+        const int32_t n = (int32_t)tokens.size();
+
+        // verification_prefix_rows: complete prepared union in the first
+        // processed view = first n_batch tokens starting at offset 0.
+        const int32_t n_batch_ctx = llama_n_batch(ctx_tgt);
+        manifest.verification_prefix_rows = std::min(n_batch_ctx, n);
+
+        while (idx < n) {
+            const int32_t block_slot = tokens[idx].id_slot;
+            int32_t block_start = idx;
+            int32_t block_rows = 1;
+
+            // Scan forward for contiguous same-slot tokens.
+            while (idx + 1 < n && tokens[idx + 1].id_slot == block_slot) {
+                idx++;
+                block_rows++;
+            }
+
+            server_execution::target_manifest_row row;
+            row.batch_offset = block_start;
+            row.logical_rows = block_rows;
+            row.slot_id      = block_slot;
+
+            auto it = slot_by_id.find(block_slot);
+            if (it != slot_by_id.end()) {
+                const auto & sl = *it->second;
+                row.is_replay = sl.spec_is_replay;
+                row.is_nextn  = false;
+
+                // A token is NextN if it appears in spec_i_batch at index >= 1.
+                if (sl.can_speculate() && !sl.spec_i_batch.empty()) {
+                    for (int32_t bi = block_start; bi < block_start + block_rows; bi++) {
+                        for (size_t di = 1; di < sl.spec_i_batch.size(); di++) {
+                            if (sl.spec_i_batch[di] == bi) {
+                                row.is_nextn = true;
+                                break;
+                            }
+                        }
+                        if (row.is_nextn) break;
+                    }
+                }
+            } else {
+                row.is_replay = false;
+                row.is_nextn  = false;
+            }
+
+            // has_output: the LAST token in the block has output=true
+            // (set by batch.set_output in DONE_PROMPT or handle_last_sampled_token).
+            row.has_output = tokens[block_start + block_rows - 1].output;
+
+            manifest.rows.push_back(row);
+            idx++;
+        }
+
+        // replay_token_count + replay_rows from generating slots that have
+        // spec_is_replay set. replay_token_count = retained accepted replay
+        // tokens (spec_draft.size()). replay_rows = 1 (sampled) + that count.
+        for (const auto & s : slots) {
+            if (s.state == SLOT_STATE_GENERATING && s.can_speculate() && s.spec_is_replay) {
+                manifest.replay_token_count += (int32_t)s.spec_draft.size();
+                manifest.replay_rows += 1 + (int32_t)s.spec_draft.size();
+            }
+        }
+
+        // retry_halving_allowed: only for prompt-tail rows
+        // (SLOT_STATE_PROCESSING_PROMPT or SLOT_STATE_DONE_PROMPT).
+        for (const auto & s : slots) {
+            if (s.state == SLOT_STATE_PROCESSING_PROMPT || s.state == SLOT_STATE_DONE_PROMPT) {
+                manifest.retry_halving_allowed = true;
+                break;
+            }
+        }
+
         return manifest;
     }
 
@@ -4409,6 +4528,12 @@ private:
                 }
             });
         }
+
+        // Phase 2 Step 7: finalize the target manifest after batch population.
+        // Records per-block geometry, verification prefix, and retry metadata
+        // derived from the real legacy seams. Record only — no decisions changed.
+        const auto manifest = finalize_legacy_target_manifest(intent);
+        (void) manifest;
     }
 
     // returns true = success ; false = retry with smaller batch size
@@ -4539,6 +4664,21 @@ private:
     }
 
     void post_decode(int32_t n_batch_tokens, int32_t off, llama_batch & batch_view) {
+        // Phase 2 Step 8: mechanical outcome recorder. Captures exact
+        // stream/block/offset identity BEFORE release/reset clears task state.
+        auto record_outcome = [&](const server_slot & slot,
+                                  server_execution::target_execution_result_kind kind) {
+            if (!target_outcome_active) {
+                return;
+            }
+            server_execution::target_execution_result result{};
+            result.stream      = { slot.id, slot.task ? (int64_t) slot.task->id : (int64_t) -1 };
+            result.kind        = kind;
+            result.block_id    = 0;
+            result.logical_rows = 0;
+            target_outcome.results.push_back(result);
+        };
+
         // for checking if a given batch index is inside batch_view
         auto is_inside_view = [&](int32_t idx) {
             return idx >= off && idx < off + n_batch_tokens;
@@ -4575,6 +4715,7 @@ private:
             if (slot.state == SLOT_STATE_DONE_PROMPT) {
                 if (slot.task->type == SERVER_TASK_TYPE_EMBEDDING) {
                     // prompt evaluated for embedding
+                    record_outcome(slot, server_execution::target_execution_result_kind::COMPLETED);
                     send_embedding(slot, batch_view);
                     slot.release();
                     slot.i_batch = -1;
@@ -4582,6 +4723,7 @@ private:
                 }
 
                 if (slot.task->type == SERVER_TASK_TYPE_RERANK) {
+                    record_outcome(slot, server_execution::target_execution_result_kind::COMPLETED);
                     send_rerank(slot, batch_view);
                     slot.release();
                     slot.i_batch = -1;
@@ -4644,6 +4786,7 @@ private:
 
             if (!process_token(result, slot)) {
                 // release slot because of stop condition
+                record_outcome(slot, server_execution::target_execution_result_kind::COMPLETED);
                 slot.print_timings();
                 send_final_response(slot);
                 metrics.on_prediction(slot);
@@ -4691,6 +4834,7 @@ private:
                         }
 
                         // partial acceptance is not supported by the context -> truncate the draft and restore the state
+                        record_outcome(slot, server_execution::target_execution_result_kind::REPLAY_CREATED);
                         slot.spec_is_replay = true;
                         slot.spec_draft = std::move(accepted);
 
@@ -4749,6 +4893,7 @@ private:
             slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - n_draft);
             slot.prompt.tokens.insert({ids.begin(), ids.end() - 1});
 
+            record_outcome(slot, server_execution::target_execution_result_kind::STREAM_ADVANCED);
             slot.sampled = ids.back(); // last accepted token
             SLT_DBG(slot, "add accepted tokens: sampled=%d, ids.size=%zu, n_draft=%zu\n", slot.sampled, ids.size(), n_draft);
 
@@ -4767,6 +4912,7 @@ private:
                 slot.n_decoded += 1;
 
                 if (!process_token(result, slot)) {
+                    record_outcome(slot, server_execution::target_execution_result_kind::COMPLETED);
                     slot.print_timings();
                     send_final_response(slot);
                     metrics.on_prediction(slot);

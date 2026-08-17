@@ -13,11 +13,28 @@
 struct server_slot;
 struct server_batch;
 struct common_params;
+struct llama_context;
 
 namespace server_execution {
 
 struct legacy_authority_token {
     bool legacy_planner = true;
+};
+
+// Step 8: exact-task-scoped multimodal authorization.
+// Temporary legacy-issued; the executor is structurally unable to
+// select a multimodal task or discover media chunks on its own.
+struct exact_task_scope {
+    inference::identity::stream_key stream;
+};
+
+struct legacy_scoped_mtmd_authorization {
+    bool legacy_planner = true;
+    exact_task_scope scope;
+};
+
+struct verification_prefix_unfit {
+    inference::identity::iteration_id iteration;
 };
 
 class executor {
@@ -51,6 +68,26 @@ public:
     // aLoRA / embedding pre-decode block (3439-3458).
     void prepare_target_context(
             const legacy_authority_token & token,
+            server_batch & batch);
+
+    // Step 8: Target execution — builds the exact server_batch and runs
+    // the decode/view loop under the manifest's retry metadata,
+    // accumulating every batch_view result under the turn's iteration_id.
+    // Returns the complete target_batch_outcome after all views settle.
+    target_batch_outcome execute_target_manifest(
+            const legacy_authority_token & token,
+            const legacy_target_manifest & manifest,
+            llama_context * ctx_tgt,
+            server_batch & batch,
+            std::vector<server_slot> & slots);
+
+    // Step 8: Exact-task-scoped multimodal execution.
+    // Wraps the legacy prompt-loop multimodal path (4186-4215).
+    // Requires temporary legacy-scoped authorization; without it,
+    // the overload refuses to execute.
+    int external_execute_mtmd(
+            const legacy_scoped_mtmd_authorization & auth,
+            std::vector<server_slot> & slots,
             server_batch & batch);
 };
 
