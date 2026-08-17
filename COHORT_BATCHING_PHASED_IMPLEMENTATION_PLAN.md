@@ -378,7 +378,7 @@ not absorbed into a server phase.
 Source commit: one dedicated documentation/fixture commit. It freezes the two
 reviewed architecture documents together with
 `COHORT_BATCHING_PHASE0_NORMAL_BASELINE.md` and
-`tools/server/tests/fixtures/cohort_batching_normal_manifest_baseline.json`.
+`tests/python/fixtures/cohort_batching_normal_manifest_baseline.json`.
 It changes no runtime source or behavior.
 
 ### Objective

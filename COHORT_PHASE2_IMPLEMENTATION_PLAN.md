@@ -76,7 +76,7 @@ re-verify them at the stated step.
   (`COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:241`).
 - No common/runtime/backend changes and no `llama_decode` change (Section 5).
 - **NORMAL target manifests must equal the Phase 0 fixtures.** The fixture
-  `tools/server/tests/fixtures/cohort_batching_normal_manifest_baseline.json` (schema_version 1,
+  `tests/python/fixtures/cohort_batching_normal_manifest_baseline.json` (schema_version 1,
   "source-derived-normal-scheduler-baseline"; JSON lines 2-3) and
   `COHORT_BATCHING_PHASE0_NORMAL_BASELINE.md` stay the acceptance oracle; the fixture notes that
   `iteration_id` is unavailable until Phase 2 (JSON line 7) and the baseline notes that legacy
@@ -323,7 +323,7 @@ at 4529 (Section 3.7), `try_activate_deferred_mtp` at 3511-3559 and its prompt-c
 - Phase 2 contract: executor exposes one **exact-task-scoped** multimodal overload; helper-internal
   media chunk aggregation, encoding, batch sizing and target calls remain opaque
   (`COHORT_BATCHING_CONTROLLER_DESIGN.md:1011`). The fixture already records this boundary:
-  `tools/server/tests/fixtures/cohort_batching_normal_manifest_baseline.json:319`
+  `tests/python/fixtures/cohort_batching_normal_manifest_baseline.json:319`
   (`"kind": "mtmd_helper_decode_image_chunk", "media_helper_batches": "opaque"`).
 - **Temporary legacy scoped authorization:** in Phase 2 the legacy planner still owns the decision to
   invoke the multimodal helper for an exact task; the executor requires a temporary legacy scoped
@@ -773,7 +773,7 @@ Call boundaries are byte-for-byte preserved:
 Verification: `git diff --stat HEAD -- common/ src/` is empty for every Phase 2 commit; the
 fixture's recorded source hashes for `common/speculative.{h,cpp}`, `common/sampling.cpp`,
 `src/llama-context.cpp`, `src/llama-batch.cpp`
-(`tools/server/tests/fixtures/cohort_batching_normal_manifest_baseline.json:23-32`) are re-checked
+(`tests/python/fixtures/cohort_batching_normal_manifest_baseline.json:23-32`) are re-checked
 before the final gate (UNVERIFIED as authoritative byte hashes until re-run at Step 13 — the fixture
 was captured against an earlier tree, `COHORT_BATCHING_PHASE0_NORMAL_BASELINE.md:7-14`).
 
@@ -879,7 +879,7 @@ sole runtime scheduling authority.").
    (`COHORT_BATCHING_CONTROLLER_DESIGN.md:528`;
    `COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:275`; `deferred-todo-work.md:198-213`).
 5. **Fixture hashes are historical** — the fixture's recorded `source_hashes_sha256`
-   (`tools/server/tests/fixtures/cohort_batching_normal_manifest_baseline.json:23-32`) were captured
+   (`tests/python/fixtures/cohort_batching_normal_manifest_baseline.json:23-32`) were captured
    against an earlier tree; re-verify before final gate (UNVERIFIED as byte hashes of the current
    tree).
 6. **Working-tree line drift** — the plan's older anchors (e.g. pre_decode at 3543-4331,

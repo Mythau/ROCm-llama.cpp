@@ -5,7 +5,7 @@ Status: review freeze for the cohort-batching authority migration.
 This document freezes the source-derived compatibility definition for the
 current NORMAL server scheduler before any authority moves. The companion
 machine-readable fixtures are in
-`tools/server/tests/fixtures/cohort_batching_normal_manifest_baseline.json`.
+`tests/python/fixtures/cohort_batching_normal_manifest_baseline.json`.
 
 ## Evidence boundary
 
