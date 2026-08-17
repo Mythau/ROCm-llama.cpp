@@ -265,6 +265,7 @@ add_executable(
     test-cohort-batching-contracts.cpp
     ${PROJECT_SOURCE_DIR}/tools/server/inference-admission.cpp
     ${PROJECT_SOURCE_DIR}/tools/server/inference-batching.cpp
+    ${PROJECT_SOURCE_DIR}/tools/server/server-execution.cpp
     ${PROJECT_SOURCE_DIR}/tools/server/server-inference.cpp
     ${PROJECT_SOURCE_DIR}/tools/server/server-inference-snapshot.cpp
     ${PROJECT_SOURCE_DIR}/tools/server/server-progress-comparator.cpp
