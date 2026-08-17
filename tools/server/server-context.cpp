@@ -7,6 +7,9 @@
 #include "server-schema.h"
 #include "server-speculative-policy.h"
 #include "server-stream.h"
+#include "server-legacy-intent.h"
+#include "server-execution-outcome.h"
+#include "server-execution.h"
 
 #include "build-info.h"
 #include "common.h"
@@ -3427,6 +3430,14 @@ private:
             }
         }
 
+        // Phase 2 Step 5: mechanical executor facade. The legacy planner
+        // remains sole scheduling authority; the executor cannot select a
+        // stream, block, or command category. The preparation pipeline
+        // routes through the legacy seams below (make_legacy_intent ->
+        // reconciliation -> unchanged grant/fill -> decode/post_decode).
+        const server_execution::legacy_authority_token legacy_auth{};
+        (void) legacy_auth;
+
         try {
             scoped_timer t(t_pre_decode, n_pre_decode);
             pre_decode();
@@ -3558,7 +3569,10 @@ private:
         slot.mtp_prefill_mode = SLOT_MTP_PREFILL_IMMEDIATE;
     }
 
-    void pre_decode() {
+    server_execution::legacy_intent make_legacy_intent() {
+        server_execution::legacy_intent intent;
+        intent.iteration = { 0 }; // allocated by the caller in Step 6
+
         // apply context-shift if needed
         // TODO: simplify and improve
         iterate(slots, [&](server_slot & slot) {
@@ -3652,6 +3666,7 @@ private:
             }
 
             generating.push_back(&slot);
+            intent.generating_ids.push_back(slot.id);
 
             if (spec) {
                 common_speculative_get_draft_params(spec.get(), slot.id).drafting = false;
@@ -3693,6 +3708,7 @@ private:
                         };
 
                         drafting.push_back(&slot);
+                        intent.drafting_ids.push_back(slot.id);
                     }
                 }
             }
@@ -3756,6 +3772,30 @@ private:
             slot.handle_last_sampled_token(batch);
         });
 
+        return intent;
+    }
+
+    server_execution::legacy_target_manifest finalize_legacy_target_manifest(const server_execution::legacy_intent & intent) {
+        server_execution::legacy_target_manifest manifest;
+        manifest.iteration = intent.iteration;
+        return manifest;
+    }
+
+    void pre_decode() {
+        const auto intent   = make_legacy_intent();
+        const auto manifest = finalize_legacy_target_manifest(intent);
+        (void) manifest; // consumed by the unchanged grant/fill tail
+
+        // track if given slot can be batched with slots already in the batch
+        auto & slot_batched = batch.slot_batched;
+
+        // Phase 2 Step 4: staged prompt reconciliation outcomes.
+        // Legacy names members below before any STARTED mutation,
+        // produces one outcome per member after mechanical
+        // reconciliation, then publishes one global snapshot before
+        // the unchanged grant/fill authority chooses rows.
+        std::vector<server_execution::prompt_reconciliation_outcome> reconciliation_outcomes;
+
         // process in chunks of params.n_batch
         int32_t n_batch  = llama_n_batch(ctx_tgt);
         int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
@@ -3796,6 +3836,9 @@ private:
 
                     // TODO: maybe move branch to outside of this loop in the future
                     if (slot.state == SLOT_STATE_STARTED) {
+                        // Phase 2 Step 4: legacy names the member here, before the
+                        // STARTED mutation below. No slot is mutated until every
+                        // named member is collected by the loop above.
                         slot.t_start_process_prompt = ggml_time_us();
                         slot.t_start_generation = 0;
 
@@ -4102,6 +4145,18 @@ private:
 
                         slot.prompt.tokens.keep_first(n_past);
 
+                        // Phase 2 Step 4: record prompt_reconciliation_outcome
+                        // after mechanical reconciliation, before grant/fill.
+                        {
+                            server_execution::prompt_reconciliation_outcome outcome{};
+                            outcome.iteration   = intent.iteration;
+                            outcome.owner       = { slot.id, slot.task ? (int64_t)slot.task->id : (int64_t)-1 };
+                            outcome.prompt_total = (uint64_t)slot.task->n_tokens();
+                            outcome.reconciled_prompt_coverage = (uint64_t)slot.n_prompt_tokens_cache;
+                            outcome.contiguous_cap = n_batch - (int32_t)batch.size();
+                            reconciliation_outcomes.push_back(outcome);
+                        }
+
                         if (slot.mtp_prefill_mode == SLOT_MTP_PREFILL_DEFERRED) {
                             common_speculative_hidden_archive_ref prefix;
                             if (n_past > 0 && slot.mtp_hidden_archive) {
@@ -4135,6 +4190,12 @@ private:
                             }
                         }
                     } // end of SLOT_STATE_STARTED
+
+                    // Phase 2 Step 4: global snapshot publication point.
+                    // Reconciliation outcomes exist for every named member;
+                    // the unchanged legacy authority chooses/grants rows below.
+                    // No target work, admission sweep, or phase transition
+                    // occurs between these stages.
 
                     if (!slot.can_split()) {
                         // cannot fit the prompt in the current batch - will try next iter
