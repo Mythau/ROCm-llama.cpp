@@ -629,7 +629,7 @@ Explicit Phase 3/4 delete-list gate: Phase 3 deletes the exact legacy authority 
 
 ### Rollback
 
-Revert Phase 3 to the Phase 2 legacy seam. After later phases land, rollback must proceed in reverse order first; see `COHORT_ROLLBACK_RUNBOOK.md` for the mandatory per-phase reverse-order steps and verification commands.
+Revert Phase 3 to the Phase 2 legacy seam. After later phases land, rollback must proceed in reverse order first; see `docs/archive/COHORT_ROLLBACK_RUNBOOK.md` for the mandatory per-phase reverse-order steps and verification commands.
 
 ## Phase 4 — Queue leases and atomic admission authority
 
@@ -782,7 +782,7 @@ existing contracts and state ownership.
 - Mechanical deletion-commit verification: after Phase 5, zero runtime references to the two deleted legacy MTP activation call sites remain (grep-verifiable). `rg -n "try_activate_deferred_mtp" tools/server/server-context.cpp` must show only the mechanical NORMAL activation operation invoked under a control commit, with no pre_decode maintenance-pass call site and no post_decode prompt-completion-transition call site.
 ### Rollback
 
-Revert Phase 5 before Phase 4 or Phase 3; see `COHORT_ROLLBACK_RUNBOOK.md` for the mandatory per-phase reverse-order steps and verification commands.
+Revert Phase 5 before Phase 4 or Phase 3; see `docs/archive/COHORT_ROLLBACK_RUNBOOK.md` for the mandatory per-phase reverse-order steps and verification commands.
 
 ## Phase 6 — Cohort runtime integration behind inaccessible paired thresholds
 

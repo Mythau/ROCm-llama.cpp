@@ -3,7 +3,7 @@
 Status: standalone implementation plan for the Phase 2 workers. Architecture authority remains
 `COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md` (Phase 2 section, lines 489-572) and
 `COHORT_BATCHING_CONTROLLER_DESIGN.md`; the approved delta is
-`COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md`. This document does not authorize any new design
+`docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md`. This document does not authorize any new design
 decision. Where the source disproves a provisional Phase 1 DTO shape, this plan records the
 replacement contract and the exact disproving seam; Phase 2 is explicitly permitted to replace
 any provisional Phase 1 DTO shape the real seam disproves
@@ -110,13 +110,13 @@ every implementation name below binds to one of those terms.
 - `prepared_decode_outcome` is an opaque, lineage-tagged descriptor: block identity, exact owner,
   fresh/replay origin, actual atomic target rows; it never re-enters candidate discovery or
   reselection (`COHORT_BATCHING_CONTROLLER_DESIGN.md:442-451`;
-  `COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:71-73`).
+  `docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:71-73`).
 - `prompt_reconciliation_outcome` carries `iteration`, exact `owner`, `prompt_total`,
   `reconciled_prompt_coverage`, `contiguous_cap` (`COHORT_BATCHING_CONTROLLER_DESIGN.md:431-440`).
   `reconciled_prompt_coverage` exists only as this tagged outcome of authorized mutating
   reconciliation, never as a passive read of `slot.prompt.tokens`, `n_prompt_tokens_processed`, or
   physical KV positions (`COHORT_BATCHING_CONTROLLER_DESIGN.md:356-359`;
-  `COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:21-24`).
+  `docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:21-24`).
 - **Phase 1 DTO replacement, disproved by the seam:** `server-execution-outcome.h:5-12` is
   `prompt_reconciliation_result` with `last_logit_pending` and `live` booleans and no
   `iteration`. The design contract instead requires `iteration`, `prompt_total`,
@@ -131,11 +131,11 @@ every implementation name below binds to one of those terms.
   lifecycle-gated fields in one struct. The real reconciliation seam
   (`tools/server/server-context.cpp:3786-4342`) mutates prompt/cache/checkpoint/speculative/memory
   state during STARTED processing, so "projection" must be the *post-reconciliation* global snapshot,
-  not a pre-mutation read. Split per `COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:106-122`: the
+  not a pre-mutation read. Split per `docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:106-122`: the
   snapshot contains raw liveness/lifecycle/task/dependency/adapter/speculative facts plus the
   lifecycle-gated `(reconciled_prompt_coverage, output_committed_count)` projection; prepared extent
   and physical KV/cache positions remain separate raw facts
-  (`COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:22-30,35-38`). `raw_*` members may keep their names but
+  (`docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:22-30,35-38`). `raw_*` members may keep their names but
   must not be re-interpreted as progress.
 
 ### 1.3 `batch_view`
@@ -272,7 +272,7 @@ rewrite (3614-3626), `slot.truncated = true` (3628).
 
 These blocks are *moved verbatim* into the temporary legacy intent producer; no selection logic may
 change. The plan's Phase 3 deletion catalogue names this range at
-`COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:159-160` (Phase 3 deletes
+`docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:159-160` (Phase 3 deletes
 `server-context.cpp:3629-3745`); Phase 2 must preserve the same source lines byte-for-byte inside
 their new location so the Phase 3 deletion can still be executed atomically.
 
@@ -340,15 +340,15 @@ at 4529 (Section 3.7), `try_activate_deferred_mtp` at 3511-3559 and its prompt-c
   4376; `metrics.on_decoded` 4378; error/retry 4380-4428; verification assign
   4434-4437; `common_speculative_process` 4439-4444; parent→child copying 4446-4467.
 - **Decode-failure whole-context sweep** `4401-4417`: the error branch releases every processing slot
-  and clears prompt/prompt-cache (`deferred-todo-work.md:174-196`). Phase 2 keeps this behavior
+  and clears prompt/prompt-cache (`docs/archive/deferred-todo-work.md:174-196`). Phase 2 keeps this behavior
   byte-for-byte as the legacy authority's existing terminal cleanup path; classification/ownership of
-  that sweep is deferred (`deferred-todo-work.md:181-196`) and remains a Phase 2 known-unknown
+  that sweep is deferred (`docs/archive/deferred-todo-work.md:181-196`) and remains a Phase 2 known-unknown
   (Section 8). Phase 2 may only route the `verification_prefix_unfit` result into this existing path;
   it must not re-scope or re-own it.
 - `common_sampler_sample_and_accept_n` sub-batch compatibility TODO:
   `server-context.cpp:4478-4486` — the post_decode guard throws if a `spec_i_batch` member lies
   outside the current view; the design names this as unresolved
-  (`COHORT_BATCHING_CONTROLLER_DESIGN.md:665`; `deferred-todo-work.md:125-140`). Phase 2 must keep the
+  (`COHORT_BATCHING_CONTROLLER_DESIGN.md:665`; `docs/archive/deferred-todo-work.md:125-140`). Phase 2 must keep the
   guard and record the TODO in the plan's risk register; it must not remove or "fix" it.
 
 ### 3.8 `post_decode()` outcomes
@@ -359,22 +359,22 @@ at 4529 (Section 3.7), `try_activate_deferred_mtp` at 3511-3559 and its prompt-c
   embedding/rerank completion 4506-4520; DONE_PROMPT→GENERATING 4522-4530 with MTP activation +
   `common_speculative_begin` 4527-4529; sampling 4540-4574; acceptance 4590-4713 including
   checkpoint replay/rollback 4611-4644 (`spec_is_replay` classification at 4611-4631 per
-  `COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:77-79`), `spec_draft = std::move(accepted)` 4653,
+  `docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:77-79`), `spec_draft = std::move(accepted)` 4653,
   response loops 4689-4708, timings 4710-4712.
 - Outcome capture must record exact stream/block/offset identity before `slot.release()`
   (`server-context.cpp:678-707`) erases current-task state. Replay creation from a completing manifest
   remains slot-owned (`COHORT_BATCHING_CONTROLLER_DESIGN.md:996-998`).
 - The prompt-completion MTP call site 4527-4529 stays live in Phase 2 (the other pre-landed Phase 5
   edit removed the pre_decode scan and added the 3501-3508 scan);
-  `COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:10` notes both sites in the post-edit tree.
+  `docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:10` notes both sites in the post-edit tree.
 
 ### 3.9 SET_LORA and deferred items
 
 - `SERVER_TASK_TYPE_SET_LORA` at `tools/server/server-context.cpp:3313-3325` writes
-  `params_base.lora_adapters` ungated (`deferred-todo-work.md:198-213`). Phase 2 **does not** gate it;
+  `params_base.lora_adapters` ungated (`docs/archive/deferred-todo-work.md:198-213`). Phase 2 **does not** gate it;
   it only records it in the executor seam catalogue as a deferred boundary-gated model mutation
   (`COHORT_BATCHING_CONTROLLER_DESIGN.md:528`;
-  `COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:275`; `deferred-todo-work.md:203-213`).
+  `COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:275`; `docs/archive/deferred-todo-work.md:203-213`).
 - Queue drain: `server_queue::start_loop()` drains tasks through `callback_new_task()` then calls
   `callback_update_slots()` (`tools/server/server-queue.cpp:125-208`; `server-context.cpp:1759-1760`
   wires `queue_tasks.on_update_slots`). Phase 2 must not change this drain-then-pump ordering.
@@ -386,13 +386,13 @@ at 4529 (Section 3.7), `try_activate_deferred_mtp` at 3511-3559 and its prompt-c
 Configure a clean CPU-only build with the flags used by the reference build
 `C:\AI\runtimes\llamacpp\builds\llamacpp-yolo-mtp-postdecode-activation-cpu` (its `CMakeCache.txt`
 records `CMAKE_BUILD_TYPE:STRING=Release`, Ninja generator, MSVC 14.44 cl.exe, `GGML_CUDA=OFF`,
-`GGML_HIP=OFF`, `GGML_VULKAN=OFF`, `GGML_METAL=OFF`, `GGML_SYCL=OFF`, `LLAMA_BUILD_SERVER=ON`,
+`GGML_HIP=OFF`, `GGML_VULKAN=OFF`, `GGML_SYCL=OFF`, `LLAMA_BUILD_SERVER=ON`,
 `LLAMA_BUILD_TESTS=ON`, `LLAMA_BUILD_COMMON=ON`):
 
 ```text
 cmake -S . -B ..\..\..\..\builds\llamacpp-phase2-cpu -G Ninja ^
   -DCMAKE_BUILD_TYPE=Release ^
-  -DGGML_CUDA=OFF -DGGML_HIP=OFF -DGGML_VULKAN=OFF -DGGML_METAL=OFF -DGGML_SYCL=OFF ^
+  -DGGML_CUDA=OFF -DGGML_HIP=OFF -DGGML_VULKAN=OFF -DGGML_SYCL=OFF ^
   -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=ON
 cmake --build ..\..\..\..\builds\llamacpp-phase2-cpu --target llama-server test-cohort-batching-contracts test-speculative-control
 ctest --test-dir ..\..\..\..\builds\llamacpp-phase2-cpu -R "test-cohort-batching-contracts|test-speculative-control" --output-on-failure
@@ -448,7 +448,7 @@ Edits:
   static/history state.
 - The projection rule: `output_committed_count = gated n_decoded` (zero unless the lifecycle gate
   allows); `pending_sampled_input` only for the sampled-token-owes-one-evaluation case
-  (`COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:23-31`).
+  (`docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:23-31`).
 - No wiring into `server-context.cpp` yet. Compile it into the dormant test target only by adding
   `server-inference.cpp` to `tests/CMakeLists.txt:263-269` beside the existing three sources, and
   include it from a new test translation unit later (Step 12).
@@ -594,7 +594,7 @@ Edits:
 - Replay blocks are mandatory known-size prefix members placed before fresh drafts and never
   drafted again (`COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:532`);
   replay pricing uses `replay_token_count`/`replay_rows` semantics per
-  `COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:77-79` and is priced before fresh candidates
+  `docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:77-79` and is priced before fresh candidates
   (`COHORT_BATCHING_CONTROLLER_DESIGN.md:637-638`).
 - Retry metadata allows `n_batch` halving for prompt-tail rows only
   (`server-context.cpp:4421-4428`); the verification prefix remains indivisible
@@ -756,7 +756,7 @@ worktree without touching the main branch.
 ## 5. Non-server workstream statement
 
 No changes to `common/`, `src/`, backend, or `llama_decode`
-(`COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:541-545`; `COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:215`).
+(`COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:541-545`; `docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:215`).
 Call boundaries are byte-for-byte preserved:
 
 - `common_speculative_draft` (`tools/server/server-context.cpp:3703`), `common_speculative_process`
@@ -865,19 +865,19 @@ sole runtime scheduling authority.").
    pre-landed post-decode generating scan; the second legacy MTP call site remains live at
    4527-4529. Phase 2 must not move, gate, or delete either; re-verify both against the final
    Phase 5 design when Phase 5 lands (`COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:9`;
-   `COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:10`).
+   `docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:10`).
 2. **`common_sampler_sample_and_accept_n` sub-batch compatibility TODO** —
    `tools/server/server-context.cpp:4478-4486` (design cites the TODO at
-   `COHORT_BATCHING_CONTROLLER_DESIGN.md:665`; deferred work at `deferred-todo-work.md:125-140`).
+   `COHORT_BATCHING_CONTROLLER_DESIGN.md:665`; deferred work at `docs/archive/deferred-todo-work.md:125-140`).
    Phase 2 keeps the guard; do not "fix" it. UNVERIFIED whether any view geometry in Phase 2 can
    trigger it with the new manifest metadata; workers re-verify with the dormant geometry tests.
 3. **Decode-failure whole-context sweep deferred** — the 4401-4417 sweep is preserved verbatim;
-   its classification/ownership is deferred (`deferred-todo-work.md:174-196`) and is a Phase 2
+   its classification/ownership is deferred (`docs/archive/deferred-todo-work.md:174-196`) and is a Phase 2
    known-unknown, not a Phase 2 change.
 4. **SET_LORA deferred** — the ungated `SERVER_TASK_TYPE_SET_LORA` write at 3313-3325 is preserved;
    boundary gating is deferred to the model-mutation classification
    (`COHORT_BATCHING_CONTROLLER_DESIGN.md:528`;
-   `COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:275`; `deferred-todo-work.md:198-213`).
+   `COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:275`; `docs/archive/deferred-todo-work.md:198-213`).
 5. **Fixture hashes are historical** — the fixture's recorded `source_hashes_sha256`
    (`tests/python/fixtures/cohort_batching_normal_manifest_baseline.json:23-32`) were captured
    against an earlier tree; re-verify before final gate (UNVERIFIED as byte hashes of the current
@@ -896,7 +896,7 @@ sole runtime scheduling authority.").
 ## 9. Rollback (revert Phase 2 while Phase 1 remains dormant)
 
 Per `COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:569-571` and
-`COHORT_ROLLBACK_RUNBOOK.md:96-106`:
+`docs/archive/COHORT_ROLLBACK_RUNBOOK.md:96-106`:
 
 ```text
 # from the working tree root
@@ -920,7 +920,7 @@ rg -n "iteration_completion" tools/server/
 
 Expected results: `update_slots()` is the single monolithic pre-extraction body; no iteration-tagged
 outcome types reach the server pump; no iteration-closure boundary exists; legacy NORMAL behavior is
-byte-for-byte identical to the Phase 0 baseline (`COHORT_ROLLBACK_RUNBOOK.md:102-106`). Phase 1's
+byte-for-byte identical to the Phase 0 baseline (`docs/archive/COHORT_ROLLBACK_RUNBOOK.md:102-106`). Phase 1's
 dormant contracts stay landed (they are the pre-Phase 2 state), and the pre-landed Phase 5 scan edit
 is outside Phase 2 rollback scope but must be left untouched by the revert.
 
