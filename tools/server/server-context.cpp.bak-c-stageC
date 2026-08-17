@@ -130,7 +130,6 @@ static std::string speculative_active_limits_to_str(
 
 static constexpr uint32_t SPECULATIVE_ACTIVE_LIMIT_SUPPORTED =
         (1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP) |
-        (1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP_ADAPTIVE) |
         (1u << COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE) |
         (1u << COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K) |
         (1u << COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V) |
@@ -860,7 +859,7 @@ struct server_slot {
             const uint32_t loaded_mask   = common_speculative_loaded_mask(spec);
             const uint32_t eligible_mask = common_speculative_eligible_mask(spec, id);
             const uint32_t stateful_mask = common_speculative_stateful_mask(spec);
-            const uint32_t mtp_mask      = (1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP) | (1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP_ADAPTIVE);
+            const uint32_t mtp_mask      = 1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
             const uint32_t synchronized_mask = stateful_mask != 0
                 ? common_speculative_stateful_synchronized_mask(spec, id)
                 : 0;
@@ -1294,10 +1293,7 @@ private:
         const bool has_draft = params.speculative.has_dft();
         const bool spec_mtp = std::find(params_base.speculative.types.begin(),
                                         params_base.speculative.types.end(),
-                                        COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end() ||
-                              std::find(params_base.speculative.types.begin(),
-                                        params_base.speculative.types.end(),
-                                        COMMON_SPECULATIVE_TYPE_DRAFT_MTP_ADAPTIVE) != params_base.speculative.types.end();
+                                        COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
         const bool has_spec = has_draft || spec_mtp;
 
         if (callback_state) {
@@ -1632,8 +1628,7 @@ private:
                     speculative_active_limits_to_str(params_base.spec_active_limits).c_str());
         }
         if (params_base.spec_mtp_deferred) {
-            if (!spec || !(common_speculative_is_loaded(spec.get(), COMMON_SPECULATIVE_TYPE_DRAFT_MTP) ||
-                            common_speculative_is_loaded(spec.get(), COMMON_SPECULATIVE_TYPE_DRAFT_MTP_ADAPTIVE))) {
+            if (!spec || !common_speculative_is_loaded(spec.get(), COMMON_SPECULATIVE_TYPE_DRAFT_MTP)) {
                 SRV_ERR("%s", "--spec-mtp-deferred requires a loaded draft-mtp implementation\n");
                 return false;
             }
@@ -2899,7 +2894,7 @@ private:
                             common_speculative_loaded_mask(spec.get()),
                             speculative_policy_limits);
 
-                    const uint32_t mtp_mask = (1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP) | (1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP_ADAPTIVE);
+                    const uint32_t mtp_mask = 1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
                     std::vector<slot_mtp_prefill_mode> mtp_modes(
                             prepared.size(), SLOT_MTP_PREFILL_TARGET_ONLY);
                     if (params_base.spec_mtp_deferred) {
@@ -3543,7 +3538,7 @@ private:
 
         const size_t active_streams = std::count_if(
                 slots.begin(), slots.end(), [](const server_slot & cur) { return cur.is_processing(); });
-        const uint32_t mtp_mask = (1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP) | (1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP_ADAPTIVE);
+        const uint32_t mtp_mask = 1u << COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
         const uint32_t allowed = server_speculative_allowed_mask(
                 active_streams, common_speculative_loaded_mask(spec.get()), speculative_policy_limits);
         if ((allowed & mtp_mask) == 0) {

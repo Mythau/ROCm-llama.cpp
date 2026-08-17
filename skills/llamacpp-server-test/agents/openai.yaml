@@ -1,0 +1,4 @@
+interface:
+  display_name: "llama.cpp Server Test"
+  short_description: "Standardize ROCm server benchmarks and comparisons"
+  default_prompt: "Use $llamacpp-server-test to plan and run a comparable llama.cpp server test."
