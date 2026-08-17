@@ -3917,10 +3917,10 @@ private:
         auto & slot_batched = batch.slot_batched;
 
         // Phase 2 Step 4: staged prompt reconciliation outcomes.
-        // Legacy names members below before any STARTED mutation,
-        // produces one outcome per member after mechanical
-        // reconciliation, then publishes one global snapshot before
-        // the unchanged grant/fill authority chooses rows.
+        // Records one outcome per member after mechanical reconciliation,
+        // before the unchanged grant/fill authority chooses rows. The
+        // planned pre-collection naming pass is not yet implemented:
+        // members are visited inline by the loop below.
         std::vector<server_execution::prompt_reconciliation_outcome> reconciliation_outcomes;
 
         // process in chunks of params.n_batch
@@ -3963,9 +3963,11 @@ private:
 
                     // TODO: maybe move branch to outside of this loop in the future
                     if (slot.state == SLOT_STATE_STARTED) {
-                        // Phase 2 Step 4: legacy names the member here, before the
-                        // STARTED mutation below. No slot is mutated until every
-                        // named member is collected by the loop above.
+                        // Phase 2 Step 4: this member's STARTED transition is
+                        // recorded here; the slot state mutation immediately
+                        // below is the legacy inline transition. The planned
+                        // pre-collection naming pass is not yet implemented
+                        // (see phase2-authority-audit/audit-03-prompt-reconciliation.md).
                         slot.t_start_process_prompt = ggml_time_us();
                         slot.t_start_generation = 0;
 
