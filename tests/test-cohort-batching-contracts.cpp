@@ -1,6 +1,7 @@
 #include "inference-admission.h"
 #include "inference-batching.h"
 #include "inference-control.h"
+#include "server-execution-outcome.h"
 
 #ifdef NDEBUG
 #    undef NDEBUG
@@ -10,6 +11,7 @@
 #include <optional>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 using inference::identity::stream_key;
@@ -18,7 +20,6 @@ static server_inference::stream_snapshot make_stream(int32_t slot, int64_t task)
     server_inference::stream_snapshot result{};
     result.stream           = { slot, task };
     result.attached         = true;
-    result.live             = true;
     result.state            = server_inference::lifecycle::PROMPT;
     result.kind             = server_inference::task_kind::COMPLETION;
     result.input            = server_inference::input_kind::TOKEN_SEQUENCE;
@@ -86,14 +87,70 @@ static void test_passive_projection() {
     projected     = server_inference::project_current_task({ passive, 41, true });
     assert(projected.output_committed_count == 41 && projected.pending_sampled_input);
 
-    passive.live = false;
-    projected    = server_inference::project_current_task({ passive, 41, true });
-    assert(projected.output_committed_count == 0 && !projected.pending_sampled_input);
-
-    passive.live     = true;
     passive.attached = false;
-    projected       = server_inference::project_current_task({ passive, 41, true });
+    projected        = server_inference::project_current_task({ passive, 41, true });
     assert(projected.output_committed_count == 0 && !projected.pending_sampled_input);
+}
+
+static void test_execution_outcomes() {
+    const inference::identity::iteration_id iteration{ 7 };
+    const stream_key                        owner{ 2, 20 };
+
+    const server_execution::prompt_reconciliation_outcome reconciliation{
+        iteration, owner, 513, 500, 13,
+    };
+    assert(reconciliation.iteration == iteration);
+    assert(reconciliation.owner == owner);
+    assert(reconciliation.prompt_total == 513);
+    assert(reconciliation.reconciled_prompt_coverage == 500);
+    assert(reconciliation.contiguous_cap == 13);
+
+    const server_execution::prepared_decode_outcome fresh{
+        iteration, 9, owner, 65, server_execution::decode_block_origin::FRESH,
+    };
+    assert(fresh.block_id == 9 && fresh.logical_rows == 65);
+    assert(fresh.origin == server_execution::decode_block_origin::FRESH);
+
+    const server_execution::prepared_decode_outcome replay{
+        iteration, 10, owner, 8, server_execution::decode_block_origin::REPLAY,
+    };
+    assert(replay.origin == server_execution::decode_block_origin::REPLAY);
+
+    server_execution::target_batch_outcome outcome;
+    outcome.iteration = iteration;
+    outcome.results.push_back({
+        owner,
+        server_execution::target_execution_result_kind::STREAM_ADVANCED,
+        fresh.block_id,
+        fresh.logical_rows,
+    });
+    outcome.results.push_back({
+        owner,
+        server_execution::target_execution_result_kind::COMPLETED,
+        fresh.block_id,
+        fresh.logical_rows,
+    });
+    assert(outcome.iteration == iteration && outcome.results.size() == 2);
+    assert(outcome.results[0].kind == server_execution::target_execution_result_kind::STREAM_ADVANCED);
+    assert(outcome.results[1].kind == server_execution::target_execution_result_kind::COMPLETED);
+
+    const server_execution::iteration_completion target_completion{ iteration, outcome };
+    assert(std::holds_alternative<server_execution::target_batch_outcome>(target_completion.payload));
+
+    const server_execution::iteration_completion admission_completion{
+        iteration, server_execution::admission_only_completion{ iteration },
+    };
+    assert(std::holds_alternative<server_execution::admission_only_completion>(admission_completion.payload));
+
+    const server_execution::iteration_completion zero_completion{
+        iteration, server_execution::zero_work_completion{ iteration },
+    };
+    assert(std::holds_alternative<server_execution::zero_work_completion>(zero_completion.payload));
+
+    const server_execution::iteration_completion failure_completion{
+        iteration, server_execution::terminal_failure_completion{ iteration, "abort_all_slots" },
+    };
+    assert(std::holds_alternative<server_execution::terminal_failure_completion>(failure_completion.payload));
 }
 
 static inference::admission::formation_assessment assess(
@@ -292,6 +349,7 @@ static void test_prompt_grants_and_cursor() {
 int main() {
     test_identity_control_values();
     test_passive_projection();
+    test_execution_outcomes();
     test_admission_assessment();
     test_normal_compatibility();
     test_decode_masks_and_maxima();
