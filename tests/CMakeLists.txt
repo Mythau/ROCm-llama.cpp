@@ -24,6 +24,7 @@ llama_build(test-recurrent-state-rollback.cpp)
 
 llama_build_and_test(test-backend-ops.cpp)
 llama_build_and_test(test-speculative-control.cpp)
+llama_build_and_test(test-server-forced-spec-replay.cpp)
 llama_build_and_test(test-batch-alloc.cpp)
 llama_build_and_test(test-arg-parser.cpp)
 

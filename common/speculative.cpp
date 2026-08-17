@@ -180,6 +180,11 @@ struct common_speculative_impl {
 
     virtual void accept(llama_seq_id seq_id, uint16_t n_accepted, bool is_other) = 0;
 
+    virtual void accept_before_forced_replay(
+            llama_seq_id seq_id, uint16_t n_accepted, bool is_other) {
+        accept(seq_id, n_accepted, is_other);
+    }
+
     // (optional) serialize/restore per-seq internal state (e.g. eagle3's deferred boundary).
     virtual bool get_state(llama_seq_id /*seq_id*/, std::vector<uint8_t> & /*data*/) const { return false; }
     virtual bool set_state(llama_seq_id /*seq_id*/, const std::vector<uint8_t> & /*data*/) { return false; }
@@ -2100,6 +2105,19 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
     }
 
+    void accept_before_forced_replay(
+            llama_seq_id seq_id, uint16_t n_accepted, bool is_other) override {
+        if (capture_active(seq_id) && !captures[seq_id].pending_tokens.empty()) {
+            auto & capture = captures[seq_id];
+            capture.pending_pos_first = -1;
+            capture.pending_tokens.clear();
+            capture.pending_rows.clear();
+            return;
+        }
+
+        accept(seq_id, n_accepted, is_other);
+    }
+
     bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) const override {
         static constexpr uint32_t state_magic   = 0x3150544d; // "MTP1" in little-endian byte order
         static constexpr uint32_t state_version = 1;
@@ -3551,7 +3569,11 @@ void common_speculative_abandon_cycle(common_speculative * spec, llama_seq_id se
     spec->impl_last[seq_id] = nullptr;
 }
 
-void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, uint16_t n_accepted) {
+static void common_speculative_accept_impl(
+        common_speculative * spec,
+        llama_seq_id seq_id,
+        uint16_t n_accepted,
+        bool before_forced_replay) {
     common_speculative_impl * impl = spec->impl_last[seq_id];
 
     GGML_ASSERT(impl);
@@ -3572,7 +3594,11 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, u
             impl->n_acc_tokens += n_accepted;
         }
 
-        impl->accept(seq_id, n_accepted, false);
+        if (before_forced_replay) {
+            impl->accept_before_forced_replay(seq_id, n_accepted, false);
+        } else {
+            impl->accept(seq_id, n_accepted, false);
+        }
         impl->n_call_accept++;
     }
 
@@ -3581,11 +3607,24 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, u
         if (impl_other.get() != impl &&
                 (common_speculative_is_eligible(spec, seq_id, impl_other->type) ||
                  (impl_other.get() == spec->impl_mtp && spec->impl_mtp->capture_active(seq_id)))) {
-            impl_other->accept(seq_id, n_accepted, true);
+            if (before_forced_replay) {
+                impl_other->accept_before_forced_replay(seq_id, n_accepted, true);
+            } else {
+                impl_other->accept(seq_id, n_accepted, true);
+            }
         }
     }
 
     spec->impl_last[seq_id] = nullptr;
+}
+
+void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, uint16_t n_accepted) {
+    common_speculative_accept_impl(spec, seq_id, n_accepted, false);
+}
+
+void common_speculative_accept_before_replay(
+        common_speculative * spec, llama_seq_id seq_id, uint16_t n_accepted) {
+    common_speculative_accept_impl(spec, seq_id, n_accepted, true);
 }
 
 common_speculative_state_result common_speculative_capture_state(common_speculative * spec, llama_seq_id seq_id) {

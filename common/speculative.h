@@ -195,6 +195,11 @@ void common_speculative_abandon_cycle(common_speculative * spec, llama_seq_id se
 // informs the speculative context that n_accepted tokens were accepted by the target model
 void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t n_accepted);
 
+// Settles the proposal exactly once before a checkpoint-backed forced replay.
+// The replay reconstructs model/implementation state from authoritative target
+// tokens; it is not another proposal-verification cycle.
+void common_speculative_accept_before_replay(common_speculative * spec, llama_seq_id, uint16_t n_accepted);
+
 enum common_speculative_state_status {
     COMMON_SPECULATIVE_STATE_TARGET_ONLY,
     COMMON_SPECULATIVE_STATE_SYNCHRONIZED,
