@@ -19,6 +19,7 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml-cpp.h"
+#include "ggml-quants.h"
 
 #include <algorithm>
 #include <atomic>
@@ -31,6 +32,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <cmath>
 #include <future>
 #include <fstream>
 #include <memory>
@@ -1218,6 +1220,14 @@ struct test_case {
     virtual bool run_whole_graph() { return false; }
     virtual std::vector<ggml_tensor *> fusion_test_nodes() { return {}; }
     virtual bool use_weight_context() { return false; }
+    virtual void capture_comparison(ggml_tensor * backend_tensor, ggml_tensor * reference_tensor,
+                                    const std::vector<float> & backend_values,
+                                    const std::vector<float> & reference_values) {
+        GGML_UNUSED(backend_tensor);
+        GGML_UNUSED(reference_tensor);
+        GGML_UNUSED(backend_values);
+        GGML_UNUSED(reference_values);
+    }
 
     ggml_cgraph * gf = nullptr;
     ggml_cgraph * gb = nullptr;
@@ -1447,6 +1457,8 @@ struct test_case {
 
             std::vector<float> f1 = tensor_to_float(t1);
             std::vector<float> f2 = tensor_to_float(t2);
+
+            ud->tc->capture_comparison(t1, t2, f1, f2);
 
             for (size_t i = 0; i < f1.size(); i++) {
                 // check for nans
@@ -6095,24 +6107,32 @@ struct test_mul_mat_vec_fusion : public test_case {
     const bool with_bias;
     const bool with_gate;
     const bool with_lane_scale;
+    const bool with_output_scale;
+    const int fixture_variant;
     std::array<int64_t, 2> batch_dims;
 
     test_mul_mat_vec_fusion(ggml_type type, ggml_glu_op op, int64_t m, int64_t n, int64_t k,
                         bool use_id = false, int n_mats = 1, int n_used = 1, bool b = false, bool with_bias = false, bool with_gate = true,
-                        bool with_lane_scale = false, std::array<int64_t, 2> batch_dims = {4, 2})
+                        bool with_lane_scale = false, std::array<int64_t, 2> batch_dims = {4, 2},
+                        bool with_output_scale = true, int fixture_variant = -1)
     : type(type), glu_op(op), m(m), n(n), k(k), use_id(use_id), n_mats(n_mats), n_used(n_used), b(b), with_bias(with_bias),
-        with_gate(with_gate), with_lane_scale(with_lane_scale), batch_dims(batch_dims) {
+        with_gate(with_gate), with_lane_scale(with_lane_scale), with_output_scale(with_output_scale), fixture_variant(fixture_variant),
+        batch_dims(batch_dims) {
         if (use_id) {
             GGML_ASSERT(n_used <= n_mats);
         }
     }
 
     std::string vars() override {
-        return VARS_TO_STR13(type, glu_op, m, n, k, use_id, n_mats, n_used, b, with_bias, with_gate, with_lane_scale, batch_dims);
+        return VARS_TO_STR15(type, glu_op, m, n, k, use_id, n_mats, n_used, b, with_bias, with_gate, with_lane_scale,
+                            with_output_scale, fixture_variant, batch_dims);
     }
 
     std::string op_desc(ggml_tensor * t) override {
         GGML_UNUSED(t);
+        if (fixture_variant >= 0) {
+            return with_gate ? "Q8_MOE_W13_EXACT" : "Q8_MOE_W2_EXACT";
+        }
         return "MUL_MAT_VEC_FUSION";
     }
 
@@ -6202,11 +6222,15 @@ struct test_mul_mat_vec_fusion : public test_case {
             return out;
         } else {
             ggml_tensor * gates = ggml_new_tensor_3d(ctx, type, k, n, n_mats);
+            ggml_set_name(gates, "gates");
             ggml_tensor * ups   = ggml_new_tensor_3d(ctx, type, k, n, n_mats);
+            ggml_set_name(ups, "ups");
             ggml_tensor * ids   = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_mats, m);
+            ggml_set_name(ids, "ids_storage");
 
             if (n_used != n_mats) {
                 ids = ggml_view_2d(ctx, ids, n_used, m, ids->nb[1], 0);
+                ggml_set_name(ids, "ids");
             }
 
             ggml_tensor * cur = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k, this->b ? 1 : n_used, m);
@@ -6241,9 +6265,12 @@ struct test_mul_mat_vec_fusion : public test_case {
 
             ggml_tensor * out = with_gate ? build_gate(ctx, ffn_gate, ffn_up) : ffn_up;
 
-            std::array<int64_t, 4> scale_ne { 1, out->ne[1], out->ne[2], out->ne[3] };
-            ggml_tensor * scale = ggml_new_tensor(ctx, out->type, 4, scale_ne.data());
-            out = ggml_mul(ctx, out, scale);
+            if (with_output_scale) {
+                std::array<int64_t, 4> scale_ne { 1, out->ne[1], out->ne[2], out->ne[3] };
+                ggml_tensor * scale = ggml_new_tensor(ctx, out->type, 4, scale_ne.data());
+                ggml_set_name(scale, "route_scale");
+                out = ggml_mul(ctx, out, scale);
+            }
 
             ggml_set_name(out, "out");
             return out;
@@ -6251,7 +6278,9 @@ struct test_mul_mat_vec_fusion : public test_case {
     }
 
     void initialize_tensors(ggml_context * ctx) override {
-        if (!use_id) {
+        if (fixture_variant >= 0) {
+            initialize_exact_fixture(ctx);
+        } else if (!use_id) {
             for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
                 init_tensor_uniform(t);
             }
@@ -6262,6 +6291,147 @@ struct test_mul_mat_vec_fusion : public test_case {
 
     double max_nmse_err() override {
         return 5e-3;
+    }
+
+private:
+    static uint32_t mix32(uint32_t x) {
+        x ^= x >> 16;
+        x *= 0x7feb352du;
+        x ^= x >> 15;
+        x *= 0x846ca68bu;
+        return x ^ (x >> 16);
+    }
+
+    float fixture_value(const char * name, int64_t row, int64_t col) const {
+        const uint32_t tag = strcmp(name, "gates") == 0 ? 0x13579bdfu :
+                             strcmp(name, "ups") == 0 ? 0x2468ace0u : 0x9e3779b9u;
+        const uint32_t h = mix32(tag ^ uint32_t(row) * 0x45d9f3bu ^ uint32_t(col));
+        return (float(int32_t(h & 0xffffu)) - 32767.5f) * (0.25f / 32767.5f);
+    }
+
+    std::array<int32_t, 8> selected_ids() const {
+        if (fixture_variant == 0) {
+            return {0, 1, 2, 3, 4, 5, 6, 7};
+        }
+        if (fixture_variant == 1) {
+            return {31, 4, n_mats > 128 ? 191 : 91, 17, 63, 2, n_mats > 128 ? 177 : 77, 45};
+        }
+        if (fixture_variant == 2) {
+            return {0, 1, n_mats/2 - 1, n_mats/2, n_mats - 4, n_mats - 3, n_mats - 2, n_mats - 1};
+        }
+        return {7, n_mats - 1, 19, n_mats/2, 3, n_mats - 2, 41, n_mats/2 - 1};
+    }
+
+    std::string fixture_stem() const {
+        return std::string(with_gate ? "w13-e" : "w2-e") +
+            std::to_string(n_mats) + "-v" + std::to_string(fixture_variant);
+    }
+
+    static void write_bytes(const std::string & path, const void * data, size_t size) {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out || (size > 0 && !out.write(reinterpret_cast<const char *>(data), size))) {
+            GGML_ABORT("could not write fixture file %s", path.c_str());
+        }
+    }
+
+    std::string fixture_path(const char * suffix) const {
+        const char * directory = std::getenv("Q8_MOE_FIXTURE_DIR");
+        if (!directory || !directory[0]) {
+            return {};
+        }
+        return std::string(directory) + "\\" + fixture_stem() + suffix;
+    }
+
+    void initialize_exact_fixture(ggml_context * ctx) {
+        GGML_ASSERT(use_id && type == GGML_TYPE_Q8_0 && glu_op == GGML_GLU_OP_SWIGLU);
+        const auto ids_selected = selected_ids();
+
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (ggml_is_view_op(t->op)) {
+                continue;
+            }
+            if (strcmp(t->name, "ids_storage") == 0) {
+                std::vector<int32_t> values(ggml_nelements(t), 0);
+                for (int i = 0; i < n_used; ++i) {
+                    values[i] = ids_selected[i];
+                }
+                ggml_backend_tensor_set(t, values.data(), 0, values.size() * sizeof(int32_t));
+                const std::string path = fixture_path("-ids.i32");
+                if (!path.empty()) {
+                    write_bytes(path, ids_selected.data(), n_used * sizeof(int32_t));
+                }
+                continue;
+            }
+            if (strcmp(t->name, "cur") == 0) {
+                std::vector<float> values(ggml_nelements(t));
+                for (size_t i = 0; i < values.size(); ++i) {
+                    if (fixture_variant == 0) {
+                        values[i] = 0.0f;
+                    } else if (fixture_variant == 1) {
+                        values[i] = float(int(i % 17) - 8) * 0.0625f;
+                    } else if (fixture_variant == 2) {
+                        values[i] = std::ldexp(float(int((i * 13) % 255) - 127) / 127.0f, int((i / 32) % 5) - 2);
+                    } else {
+                        const uint32_t h = mix32(0xa511e9b3u ^ uint32_t(i));
+                        values[i] = (float(int32_t(h & 0xffffu)) - 32767.5f) / 32767.5f;
+                    }
+                }
+                ggml_backend_tensor_set(t, values.data(), 0, values.size() * sizeof(float));
+                const std::string f32_path = fixture_path("-input.f32");
+                if (!f32_path.empty()) {
+                    write_bytes(f32_path, values.data(), values.size() * sizeof(float));
+                    std::vector<block_q8_1> quantized(values.size() / QK8_1);
+                    for (int route = 0; route < n_used; ++route) {
+                        quantize_row_q8_1_ref(values.data() + route * k, quantized.data() + route * (k / QK8_1), k);
+                    }
+                    write_bytes(fixture_path("-input-q8_1.bin"), quantized.data(), quantized.size() * sizeof(block_q8_1));
+                }
+                continue;
+            }
+            if (strcmp(t->name, "gates") == 0 || strcmp(t->name, "ups") == 0) {
+                constexpr int64_t rows_per_chunk = 64;
+                const int64_t row_count = ggml_nrows(t);
+                const size_t row_bytes = ggml_row_size(t->type, t->ne[0]);
+                std::vector<float> values(rows_per_chunk * t->ne[0]);
+                std::vector<uint8_t> quantized(rows_per_chunk * row_bytes);
+                for (int64_t row0 = 0; row0 < row_count; row0 += rows_per_chunk) {
+                    const int64_t rows = std::min<int64_t>(rows_per_chunk, row_count - row0);
+                    for (int64_t row = 0; row < rows; ++row) {
+                        for (int64_t col = 0; col < t->ne[0]; ++col) {
+                            values[row * t->ne[0] + col] = fixture_value(t->name, row0 + row, col);
+                        }
+                    }
+                    ggml_quantize_chunk(t->type, values.data(), quantized.data(), 0, rows, t->ne[0], nullptr);
+                    ggml_backend_tensor_set(t, quantized.data(), row0 * row_bytes, rows * row_bytes);
+                }
+                const std::string path = fixture_path(strcmp(t->name, "gates") == 0 ? "-gates-selected.q8_0" : "-ups-selected.q8_0");
+                if (!path.empty()) {
+                    const size_t expert_bytes = n * row_bytes;
+                    std::vector<uint8_t> selected(n_used * expert_bytes);
+                    for (int i = 0; i < n_used; ++i) {
+                        ggml_backend_tensor_get(t, selected.data() + i * expert_bytes,
+                                                size_t(ids_selected[i]) * expert_bytes, expert_bytes);
+                    }
+                    write_bytes(path, selected.data(), selected.size());
+                }
+                continue;
+            }
+            init_tensor_uniform(t);
+        }
+    }
+
+    void capture_comparison(ggml_tensor * backend_tensor, ggml_tensor * reference_tensor,
+                            const std::vector<float> & backend_values,
+                            const std::vector<float> & reference_values) override {
+        GGML_UNUSED(reference_tensor);
+        if (fixture_variant < 0 || strcmp(backend_tensor->name, "out") != 0) {
+            return;
+        }
+        const std::string backend_path = fixture_path("-control-hip.f32");
+        if (!backend_path.empty()) {
+            write_bytes(backend_path, backend_values.data(), backend_values.size() * sizeof(float));
+            write_bytes(fixture_path("-cpu-reference.f32"), reference_values.data(), reference_values.size() * sizeof(float));
+        }
     }
 };
 
@@ -9654,6 +9824,19 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_opt_step_adamw(GGML_TYPE_F32, {10, 5, 4, 3}));
     test_cases.emplace_back(new test_opt_step_sgd(GGML_TYPE_F32, {10, 5, 4, 3}));
 
+    // Frozen campaign-authority cases for the exact Qwen3.6 decode W1/W3 + SwiGLU boundary.
+    // The final route scaling is deliberately excluded because it is downstream of this boundary.
+    for (int n_mats : {128, 256}) {
+        for (int fixture_variant = 0; fixture_variant < 4; ++fixture_variant) {
+            test_cases.emplace_back(new test_mul_mat_vec_fusion(
+                GGML_TYPE_Q8_0, GGML_GLU_OP_SWIGLU, 1, 512, 2048,
+                true, n_mats, 8, true, false, true, false, {1, 1}, false, fixture_variant));
+            test_cases.emplace_back(new test_mul_mat_vec_fusion(
+                GGML_TYPE_Q8_0, GGML_GLU_OP_SWIGLU, 1, 2048, 512,
+                true, n_mats, 8, false, false, false, false, {1, 1}, false, fixture_variant));
+        }
+    }
+
     for (ggml_type type : base_types) {
         for (bool with_gate : {false, true}) {
             for (bool use_id : {false, true}) {
@@ -9796,6 +9979,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 // Test cases for performance evaluation: should be representative of real-world use cases
 static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     std::vector<std::unique_ptr<test_case>> test_cases;
+
+    for (int n_mats : {128, 256}) {
+        test_cases.emplace_back(new test_mul_mat_vec_fusion(
+            GGML_TYPE_Q8_0, GGML_GLU_OP_SWIGLU, 1, 512, 2048,
+            true, n_mats, 8, true, false, true, false, {1, 1}, false, 3));
+        test_cases.emplace_back(new test_mul_mat_vec_fusion(
+            GGML_TYPE_Q8_0, GGML_GLU_OP_SWIGLU, 1, 2048, 512,
+            true, n_mats, 8, false, false, false, false, {1, 1}, false, 3));
+    }
 
     // SWIGLU at a 27B-class FFN width, fused [gate|up] vs split operands
     // note: same bytes either way, so a backend that indexes them differently shows it here

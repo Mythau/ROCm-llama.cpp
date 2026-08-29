@@ -4,12 +4,104 @@
 #include "vecdotq.cuh"
 
 #include <cstdint>
+#include <atomic>
+#ifdef GGML_MOE_PROFILE
+#include "q8_clock_probe.cuh"
+#elif defined(GGML_MOE_EVENT_PROFILE)
+#include "q8_moe_event_probe.cuh"
+#endif
 #include "q8-row-owned.cuh"
 #ifdef GGML_CUMULATIVE_VERIFY
 extern "C" void ggml_cumulative_count(int kind, int device);
 #endif
 
+#ifdef GGML_W13_VERIFY
+static std::atomic<uint64_t> q8_moe_w13_selection_count {};
+static std::atomic<uint64_t> q8_moe_w2_selection_count {};
+extern "C" __declspec(dllexport) void ggml_q8_moe_w13_counter_reset() {
+    q8_moe_w13_selection_count.store(0, std::memory_order_relaxed);
+}
+extern "C" __declspec(dllexport) uint64_t ggml_q8_moe_w13_counter_read() {
+    return q8_moe_w13_selection_count.load(std::memory_order_relaxed);
+}
+extern "C" __declspec(dllexport) void ggml_q8_moe_w2_counter_reset() {
+    q8_moe_w2_selection_count.store(0, std::memory_order_relaxed);
+}
+extern "C" __declspec(dllexport) uint64_t ggml_q8_moe_w2_counter_read() {
+    return q8_moe_w2_selection_count.load(std::memory_order_relaxed);
+}
+struct q8_moe_w13_selection_reporter {
+    ~q8_moe_w13_selection_reporter() {
+        std::fprintf(stderr, "w13_row_owned_selection=%llu w2_row_owned_selection=%llu\n",
+            static_cast<unsigned long long>(q8_moe_w13_selection_count.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(q8_moe_w2_selection_count.load(std::memory_order_relaxed)));
+    }
+};
+static q8_moe_w13_selection_reporter q8_moe_w13_reporter;
+#define GGML_W13_COUNT() q8_moe_w13_selection_count.fetch_add(1, std::memory_order_relaxed)
+#define GGML_W2_COUNT() q8_moe_w2_selection_count.fetch_add(1, std::memory_order_relaxed)
+#else
+#define GGML_W13_COUNT() ((void) 0)
+#define GGML_W2_COUNT() ((void) 0)
+#endif
+
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
+
+void ggml_cuda_moe_w2_weighted_reduce_q8(
+        ggml_backend_cuda_context & ctx, const ggml_tensor * weights, const ggml_tensor * activations,
+        const ggml_tensor * ids, const ggml_tensor * route_weights, ggml_tensor * dst) {
+    cudaStream_t stream = ctx.stream();
+    const int64_t ne0_padded = GGML_PAD(activations->ne[0], MATRIX_ROW_PADDING);
+    const size_t q8_bytes = activations->ne[3] * activations->ne[2] * activations->ne[1] * ne0_padded *
+        sizeof(block_q8_1) / QK8_1;
+    const float * activations_d = (const float *) activations->data;
+    ggml_cuda_pool_alloc<char> activation_q8_1(ctx.pool());
+    char * activation_q8_d = nullptr;
+
+    static const bool luce_q8_memo_on = []() {
+        const char * e = getenv("LUCE_Q8_MEMO");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    if (luce_q8_memo_on) {
+        for (const auto & e : ctx.luce_q8_memo) {
+            if (e.src1_node == (const void *) activations && e.src1_data == (const void *) activations_d &&
+                    e.src0_type == (int) weights->type &&
+                    e.ne[0] == activations->ne[0] && e.ne[1] == activations->ne[1] &&
+                    e.ne[2] == activations->ne[2] && e.ne[3] == activations->ne[3]) {
+                activation_q8_d = e.buf->ptr;
+                break;
+            }
+        }
+    }
+    if (activation_q8_d == nullptr) {
+        char * q8_dst;
+        if (luce_q8_memo_on) {
+            ggml_backend_cuda_context::luce_q8_memo_entry ent;
+            ent.src1_node = (const void *) activations;
+            ent.src1_data = (const void *) activations_d;
+            ent.src0_type = (int) weights->type;
+            ent.ne[0] = activations->ne[0]; ent.ne[1] = activations->ne[1];
+            ent.ne[2] = activations->ne[2]; ent.ne[3] = activations->ne[3];
+            ent.buf = std::make_unique<ggml_cuda_pool_alloc<char>>(ctx.pool(), q8_bytes);
+            q8_dst = ent.buf->ptr;
+            ctx.luce_q8_memo.push_back(std::move(ent));
+        } else {
+            activation_q8_1.alloc(q8_bytes);
+            q8_dst = activation_q8_1.ptr;
+        }
+        const size_t ts = ggml_type_size(activations->type);
+        quantize_row_q8_1_cuda(activations_d, nullptr, q8_dst, weights->type,
+            activations->ne[0], activations->nb[1] / ts, activations->nb[2] / ts, activations->nb[3] / ts,
+            ne0_padded, activations->ne[1], activations->ne[2], activations->ne[3], stream);
+        activation_q8_d = q8_dst;
+    }
+
+    GGML_W2_COUNT();
+    const ggml_cuda_kernel_launch_params params(dim3(256, 1, 1), dim3(32, 8, 1), 0, stream);
+    ggml_cuda_kernel_launch(q8_0_moe_w2_512x2048_weighted_reduce_row_owned_rdna3, params,
+        weights->data, (const block_q8_1 *) activation_q8_d, (const int32_t *) ids->data,
+        (const float *) route_weights->data, (float *) dst->data);
+}
 
 static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) {
     switch (type) {
@@ -489,7 +581,20 @@ static __global__ void mul_mat_vec_q(
         const uint32_t stride_col_dst, const uint3 channel_ratio, const uint32_t stride_channel_x,
         const uint32_t stride_channel_y, const uint32_t stride_channel_dst, const uint3 sample_ratio,
         const uint32_t stride_sample_x, const uint32_t stride_sample_y, const uint32_t stride_sample_dst,
-        const uint32_t ids_stride) {
+        const uint32_t ids_stride
+#ifdef GGML_MOE_PROFILE
+        , uint64_t * clock_values
+#endif
+        ) {
+#ifdef GGML_MOE_PROFILE
+    const bool clock_first = blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 &&
+        threadIdx.x == 0 && threadIdx.y == 0;
+    const bool clock_last = blockIdx.x + 1 == gridDim.x && blockIdx.y + 1 == gridDim.y &&
+        blockIdx.z + 1 == gridDim.z && threadIdx.x == 0 && threadIdx.y == 0;
+    if (clock_values != nullptr && clock_first) {
+        clock_values[0] = wall_clock64();
+    }
+#endif
     const void    * GGML_CUDA_RESTRICT vx  = vx_ptr;
     const void    * GGML_CUDA_RESTRICT vy  = vy_ptr;
     const int32_t * GGML_CUDA_RESTRICT ids = ids_ptr;
@@ -710,6 +815,11 @@ static __global__ void mul_mat_vec_q(
     if constexpr (type != GGML_TYPE_NVFP4) {
         GGML_UNUSED_VARS(use_scale, use_gate_scale, x_scale, gate_scale, x_scales, gate_scales);
     }
+#ifdef GGML_MOE_PROFILE
+    if (clock_values != nullptr && clock_last) {
+        clock_values[1] = wall_clock64();
+    }
+#endif
 }
 
 // Dedicated MoE multi-token kernel.
@@ -823,13 +933,26 @@ static void mul_mat_vec_q_switch_fusion(
 
     const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr ||
                             fusion.x_scale != nullptr || fusion.gate_scale != nullptr;
+#ifdef GGML_MOE_PROFILE
+    uint64_t * clock_values = q8_clock::begin(block_nums, block_dims, ncols_x, ids != nullptr);
+#elif defined(GGML_MOE_EVENT_PROFILE)
+    q8_clock::set_stream(stream);
+    q8_clock::begin(block_nums, block_dims, ncols_x, ids != nullptr);
+#endif
     if constexpr (c_ncols_dst == 1) {
         if (has_fusion) {
             const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(block_nums, block_dims, nbytes_shared, stream);
             ggml_cuda_kernel_launch(mul_mat_vec_q<type, c_ncols_dst, true, small_k>, launch_params,
                  vx, vy, ids, fusion, dst, ncols_x, nchannels_y, stride_row_x, stride_col_y, stride_col_dst,
                  channel_ratio, stride_channel_x, stride_channel_y, stride_channel_dst,
-                 sample_ratio, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride);
+                 sample_ratio, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride
+#ifdef GGML_MOE_PROFILE
+                 , clock_values
+#endif
+                 );
+#if defined(GGML_MOE_PROFILE) || defined(GGML_MOE_EVENT_PROFILE)
+            q8_clock::end();
+#endif
             return;
         }
     }
@@ -840,7 +963,14 @@ static void mul_mat_vec_q_switch_fusion(
     ggml_cuda_kernel_launch(mul_mat_vec_q<type, c_ncols_dst, false, small_k>, launch_params,
         vx, vy, ids, fusion, dst, ncols_x, nchannels_y, stride_row_x, stride_col_y, stride_col_dst,
         channel_ratio, stride_channel_x, stride_channel_y, stride_channel_dst,
-        sample_ratio, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride);
+        sample_ratio, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride
+#ifdef GGML_MOE_PROFILE
+        , clock_values
+#endif
+        );
+#if defined(GGML_MOE_PROFILE) || defined(GGML_MOE_EVENT_PROFILE)
+    q8_clock::end();
+#endif
 }
 
 template <ggml_type type>
@@ -1182,6 +1312,9 @@ static void mul_mat_vec_q_switch_type(
 void ggml_cuda_mul_mat_vec_q(
         ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst,
         const ggml_cuda_mm_fusion_args_host * fusion, bool row_owned) {
+#if defined(GGML_MOE_PROFILE) || defined(GGML_MOE_EVENT_PROFILE)
+    q8_clock::tensor(src0, dst, ctx.device);
+#endif
     GGML_ASSERT(        src1->type == GGML_TYPE_F32);
     GGML_ASSERT(        dst->type  == GGML_TYPE_F32);
     GGML_ASSERT(!ids || ids->type  == GGML_TYPE_I32); // Optional, used for batched GGML_MUL_MAT_ID.
@@ -1313,6 +1446,77 @@ void ggml_cuda_mul_mat_vec_q(
         const ggml_cuda_kernel_launch_params params(dim3(1024, 1, 1), dim3(32, 8, 1), 0, stream);
         ggml_cuda_kernel_launch(q8_0_2048x8192_row_owned_rdna3, params,
             src0->data, (const block_q8_1 *) src1_q8_d, dst_d);
+        return;
+    }
+#endif
+
+// The row-owned W1/W3 mapping is an opt-in research control: it preserves
+// arithmetic but regressed the measured boundary. Do not select it merely
+// because the retained W2 specialization is enabled.
+#if defined(GGML_EXACT_W13_ENABLE) && !defined(GGML_EXACT_MOE_DISABLE) && !defined(GGML_EXACT_W13_DISABLE)
+    const bool exact_w13_shape =
+        src0->type == GGML_TYPE_Q8_0 && ids != nullptr && fusion != nullptr &&
+        fusion->gate != nullptr && fusion->x_bias == nullptr && fusion->gate_bias == nullptr &&
+        fusion->x_scale == nullptr && fusion->gate_scale == nullptr &&
+        fusion->glu_op == GGML_GLU_OP_SWIGLU &&
+        ne00 == 2048 && ne01 == 512 && (ne02 == 128 || ne02 == 256) && ne03 == 1 &&
+        ne10 == 2048 && ne11 == 1 && ne12 == 1 && ne13 == 1 &&
+        dst->ne[0] == 512 && dst->ne[1] == 8 && dst->ne[2] == 1 && dst->ne[3] == 1 &&
+        ids->ne[0] == 8 && ids->ne[1] == 1 && ids->ne[2] == 1 && ids->ne[3] == 1 &&
+        ggml_is_contiguous(src0) && ggml_is_contiguous(fusion->gate) &&
+        ggml_is_contiguous(src1) && ggml_is_contiguous(dst);
+    if (exact_w13_shape && GGML_CUDA_CC_IS_RDNA3_0(ggml_cuda_info().devices[ctx.device].cc)) {
+        GGML_W13_COUNT();
+        const dim3 grid(64, 8, 1);
+        const dim3 block(32, 8, 1);
+        const ggml_cuda_kernel_launch_params params(grid, block, 0, stream);
+#ifdef GGML_MOE_PROFILE
+        uint64_t * clock_values = q8_clock::begin(grid, block, ne00, true);
+#elif defined(GGML_MOE_EVENT_PROFILE)
+        q8_clock::set_stream(stream);
+        q8_clock::begin(grid, block, ne00, true);
+#endif
+        ggml_cuda_kernel_launch(q8_0_moe_w13_2048x512_swiglu_row_owned_rdna3, params,
+            src0->data, fusion_local.gate, (const block_q8_1 *) src1_q8_d, ids_d, dst_d
+#ifdef GGML_MOE_PROFILE
+            , clock_values
+#endif
+            );
+#if defined(GGML_MOE_PROFILE) || defined(GGML_MOE_EVENT_PROFILE)
+        q8_clock::end();
+#endif
+        return;
+    }
+#endif
+
+#if !defined(GGML_EXACT_MOE_DISABLE) && !defined(GGML_EXACT_W2_DISABLE)
+    const bool exact_w2_shape =
+        src0->type == GGML_TYPE_Q8_0 && ids != nullptr && fusion == nullptr &&
+        ne00 == 512 && ne01 == 2048 && (ne02 == 128 || ne02 == 256) && ne03 == 1 &&
+        ne10 == 512 && ne11 == 8 && ne12 == 1 && ne13 == 1 &&
+        dst->ne[0] == 2048 && dst->ne[1] == 8 && dst->ne[2] == 1 && dst->ne[3] == 1 &&
+        ids->ne[0] == 8 && ids->ne[1] == 1 && ids->ne[2] == 1 && ids->ne[3] == 1 &&
+        ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst);
+    if (exact_w2_shape && GGML_CUDA_CC_IS_RDNA3_0(ggml_cuda_info().devices[ctx.device].cc)) {
+        GGML_W2_COUNT();
+        const dim3 grid(256, 8, 1);
+        const dim3 block(32, 8, 1);
+        const ggml_cuda_kernel_launch_params params(grid, block, 0, stream);
+#ifdef GGML_MOE_PROFILE
+        uint64_t * clock_values = q8_clock::begin(grid, block, ne00, true);
+#elif defined(GGML_MOE_EVENT_PROFILE)
+        q8_clock::set_stream(stream);
+        q8_clock::begin(grid, block, ne00, true);
+#endif
+        ggml_cuda_kernel_launch(q8_0_moe_w2_512x2048_row_owned_rdna3, params,
+            src0->data, (const block_q8_1 *) src1_q8_d, ids_d, dst_d
+#ifdef GGML_MOE_PROFILE
+            , clock_values
+#endif
+            );
+#if defined(GGML_MOE_PROFILE) || defined(GGML_MOE_EVENT_PROFILE)
+        q8_clock::end();
+#endif
         return;
     }
 #endif

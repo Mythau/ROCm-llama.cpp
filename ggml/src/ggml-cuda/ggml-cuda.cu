@@ -3269,6 +3269,88 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
+    // Exact Qwen3.6 decode W2 -> route MUL -> eight ordered views -> seven
+    // left-associated ADDs. The complete cheap predicate precedes the gfx1100
+    // lookup so unrelated Q8/ID launches pay no architecture-query cost.
+    if (node->op == GGML_OP_MUL_MAT_ID && i + 16 < cgraph->n_nodes) {
+        ggml_tensor * route_mul = cgraph->nodes[i + 1];
+        ggml_tensor * final_add = cgraph->nodes[i + 16];
+        const ggml_tensor * weights = node->src[0];
+        const ggml_tensor * activations = node->src[1];
+        const ggml_tensor * ids = node->src[2];
+
+        const bool exact_shape =
+            weights != nullptr && activations != nullptr && ids != nullptr &&
+            weights->type == GGML_TYPE_Q8_0 && activations->type == GGML_TYPE_F32 &&
+            ids->type == GGML_TYPE_I32 && node->type == GGML_TYPE_F32 &&
+            weights->ne[0] == 512 && weights->ne[1] == 2048 &&
+            (weights->ne[2] == 128 || weights->ne[2] == 256) && weights->ne[3] == 1 &&
+            activations->ne[0] == 512 && activations->ne[1] == 8 &&
+            activations->ne[2] == 1 && activations->ne[3] == 1 &&
+            ids->ne[0] == 8 && ids->ne[1] == 1 && ids->ne[2] == 1 && ids->ne[3] == 1 &&
+            node->ne[0] == 2048 && node->ne[1] == 8 && node->ne[2] == 1 && node->ne[3] == 1 &&
+            final_add->type == GGML_TYPE_F32 && final_add->ne[0] == 2048 &&
+            final_add->ne[1] == 1 && final_add->ne[2] == 1 && final_add->ne[3] == 1 &&
+            ggml_is_contiguous(weights) && ggml_is_contiguous(activations) &&
+            ggml_is_contiguous(ids) && ggml_is_contiguous(final_add);
+
+        if (exact_shape) {
+            const ggml_tensor * route_weights = nullptr;
+            if (route_mul->op == GGML_OP_MUL && route_mul->src[0] == node) {
+                route_weights = route_mul->src[1];
+            } else if (route_mul->op == GGML_OP_MUL && route_mul->src[1] == node) {
+                route_weights = route_mul->src[0];
+            }
+
+            bool exact_chain = route_weights != nullptr && route_weights->type == GGML_TYPE_F32 &&
+                route_weights->ne[0] == 1 && route_weights->ne[1] == 8 &&
+                route_weights->ne[2] == 1 && route_weights->ne[3] == 1 &&
+                ggml_is_contiguous(route_weights) && ggml_are_same_shape(route_mul, node);
+
+            for (int slot = 0; exact_chain && slot < 8; ++slot) {
+                const ggml_tensor * view = cgraph->nodes[i + 2 + slot];
+                exact_chain = view->op == GGML_OP_VIEW && view->src[0] == route_mul &&
+                    view->type == GGML_TYPE_F32 && view->ne[0] == 2048 && view->ne[1] == 1 &&
+                    view->ne[2] == 1 && view->ne[3] == 1 &&
+                    (const char *) view->data == (const char *) route_mul->data + slot * route_mul->nb[1];
+            }
+
+            for (int add = 0; exact_chain && add < 7; ++add) {
+                const ggml_tensor * add_node = cgraph->nodes[i + 10 + add];
+                const ggml_tensor * lhs = add == 0 ? cgraph->nodes[i + 2] : cgraph->nodes[i + 9 + add];
+                const ggml_tensor * rhs = cgraph->nodes[i + 3 + add];
+                exact_chain = add_node->op == GGML_OP_ADD && add_node->src[0] == lhs && add_node->src[1] == rhs;
+            }
+
+            const ggml_op ops[17] = {
+                GGML_OP_MUL_MAT_ID, GGML_OP_MUL,
+                GGML_OP_VIEW, GGML_OP_VIEW, GGML_OP_VIEW, GGML_OP_VIEW,
+                GGML_OP_VIEW, GGML_OP_VIEW, GGML_OP_VIEW, GGML_OP_VIEW,
+                GGML_OP_ADD, GGML_OP_ADD, GGML_OP_ADD, GGML_OP_ADD,
+                GGML_OP_ADD, GGML_OP_ADD, GGML_OP_ADD,
+            };
+            const int out_nodes[] = { i + 16 };
+            const auto overlaps = [](const ggml_tensor * a, const ggml_tensor * b) {
+                const uintptr_t a0 = (uintptr_t) a->data;
+                const uintptr_t a1 = a0 + ggml_backend_buft_get_alloc_size(a->buffer->buft, a);
+                const uintptr_t b0 = (uintptr_t) b->data;
+                const uintptr_t b1 = b0 + ggml_backend_buft_get_alloc_size(b->buffer->buft, b);
+                return a0 < b1 && b0 < a1;
+            };
+            // graph_optimize extends these dynamic inputs through the final
+            // output allocation, so the fused kernel consumes them directly.
+            const bool external_ranges_ok = route_weights != nullptr &&
+                !overlaps(final_add, weights) && !overlaps(final_add, activations) &&
+                !overlaps(final_add, ids) && !overlaps(final_add, route_weights);
+            if (exact_chain && ggml_can_fuse_subgraph(cgraph, i, 17, ops, out_nodes, 1) &&
+                    external_ranges_ok &&
+                    GGML_CUDA_CC_IS_RDNA3_0(ggml_cuda_info().devices[cuda_ctx->device].cc)) {
+                ggml_cuda_moe_w2_weighted_reduce_q8(*cuda_ctx, weights, activations, ids, route_weights, final_add);
+                return 16;
+            }
+        }
+    }
+
     // gated_delta_net -> cpy: scatter recurrent-state snapshots into the cache
     if (node->op == GGML_OP_GATED_DELTA_NET) {
         ggml_cuda_gated_delta_net_fused_cache fused_state_cpy;
@@ -4332,8 +4414,82 @@ static void ggml_backend_cuda_event_wait(ggml_backend_t backend, ggml_backend_ev
     }
 }
 
+static void ggml_cuda_extend_exact_w2_lifetimes(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph) {
+    bool arch_checked = false;
+    bool is_gfx1100 = false;
+
+    for (int i = 0; i + 16 < cgraph->n_nodes; ++i) {
+        ggml_tensor * w2 = cgraph->nodes[i];
+        if (w2->op != GGML_OP_MUL_MAT_ID) {
+            continue;
+        }
+
+        ggml_tensor * route_mul = cgraph->nodes[i + 1];
+        ggml_tensor * final_add = cgraph->nodes[i + 16];
+        ggml_tensor * weights = w2->src[0];
+        ggml_tensor * activations = w2->src[1];
+        ggml_tensor * ids = w2->src[2];
+        const bool exact_shape =
+            weights != nullptr && activations != nullptr && ids != nullptr &&
+            weights->type == GGML_TYPE_Q8_0 && activations->type == GGML_TYPE_F32 &&
+            ids->type == GGML_TYPE_I32 && w2->type == GGML_TYPE_F32 &&
+            weights->ne[0] == 512 && weights->ne[1] == 2048 &&
+            (weights->ne[2] == 128 || weights->ne[2] == 256) && weights->ne[3] == 1 &&
+            activations->ne[0] == 512 && activations->ne[1] == 8 &&
+            activations->ne[2] == 1 && activations->ne[3] == 1 &&
+            ids->ne[0] == 8 && ids->ne[1] == 1 && ids->ne[2] == 1 && ids->ne[3] == 1 &&
+            w2->ne[0] == 2048 && w2->ne[1] == 8 && w2->ne[2] == 1 && w2->ne[3] == 1 &&
+            final_add->type == GGML_TYPE_F32 && final_add->ne[0] == 2048 &&
+            final_add->ne[1] == 1 && final_add->ne[2] == 1 && final_add->ne[3] == 1;
+        if (!exact_shape) {
+            continue;
+        }
+
+        ggml_tensor * route_weights = nullptr;
+        if (route_mul->op == GGML_OP_MUL && route_mul->src[0] == w2) {
+            route_weights = route_mul->src[1];
+        } else if (route_mul->op == GGML_OP_MUL && route_mul->src[1] == w2) {
+            route_weights = route_mul->src[0];
+        }
+        bool exact_chain = route_weights != nullptr && route_weights->type == GGML_TYPE_F32 &&
+            route_weights->ne[0] == 1 && route_weights->ne[1] == 8 &&
+            route_weights->ne[2] == 1 && route_weights->ne[3] == 1;
+        for (int slot = 0; exact_chain && slot < 8; ++slot) {
+            const ggml_tensor * view = cgraph->nodes[i + 2 + slot];
+            exact_chain = view->op == GGML_OP_VIEW && view->view_src == route_mul &&
+                view->ne[0] == 2048 && view->ne[1] == 1 && view->ne[2] == 1 && view->ne[3] == 1;
+        }
+        for (int add = 0; exact_chain && add < 7; ++add) {
+            const ggml_tensor * add_node = cgraph->nodes[i + 10 + add];
+            const ggml_tensor * lhs = add == 0 ? cgraph->nodes[i + 2] : cgraph->nodes[i + 9 + add];
+            const ggml_tensor * rhs = cgraph->nodes[i + 3 + add];
+            exact_chain = add_node->op == GGML_OP_ADD && add_node->src[0] == lhs && add_node->src[1] == rhs;
+        }
+        if (!exact_chain || final_add->src[2] != nullptr || final_add->src[3] != nullptr || final_add->src[4] != nullptr) {
+            continue;
+        }
+
+        if (!arch_checked) {
+            is_gfx1100 = GGML_CUDA_CC_IS_RDNA3_0(ggml_cuda_info().devices[cuda_ctx->device].cc);
+            arch_checked = true;
+        }
+        if (!is_gfx1100) {
+            return;
+        }
+
+        // graph_optimize runs before ggml-alloc. These dependency-only sources
+        // keep the producer allocations live through the final fused consumer;
+        // the same stream already orders their producers before that consumer.
+        final_add->src[2] = activations;
+        final_add->src[3] = ids;
+        final_add->src[4] = route_weights;
+    }
+}
+
 static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
+
+    ggml_cuda_extend_exact_w2_lifetimes(cuda_ctx, cgraph);
 
 #ifdef USE_CUDA_GRAPH
     const void * graph_key = ggml_cuda_graph_get_key(cgraph);

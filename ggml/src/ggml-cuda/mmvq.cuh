@@ -14,6 +14,10 @@ void ggml_cuda_mul_mat_vec_q(ggml_backend_cuda_context & ctx,
     // exact gfx1100 Q8 projection selected by cumulative-specializations.cuh.
     const ggml_cuda_mm_fusion_args_host * fusion = nullptr, bool row_owned = false);
 
+void ggml_cuda_moe_w2_weighted_reduce_q8(
+    ggml_backend_cuda_context & ctx, const ggml_tensor * weights, const ggml_tensor * activations,
+    const ggml_tensor * ids, const ggml_tensor * route_weights, ggml_tensor * dst);
+
 void ggml_cuda_op_mul_mat_vec_q(
     ggml_backend_cuda_context & ctx,
     const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst, const char * src0_dd_i, const float * src1_ddf_i,
