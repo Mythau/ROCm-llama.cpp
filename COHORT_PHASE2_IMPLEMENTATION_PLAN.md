@@ -340,15 +340,15 @@ at 4529 (Section 3.7), `try_activate_deferred_mtp` at 3511-3559 and its prompt-c
   4376; `metrics.on_decoded` 4378; error/retry 4380-4428; verification assign
   4434-4437; `common_speculative_process` 4439-4444; parent→child copying 4446-4467.
 - **Decode-failure whole-context sweep** `4401-4417`: the error branch releases every processing slot
-  and clears prompt/prompt-cache (`docs/archive/deferred-todo-work.md:174-196`). Phase 2 keeps this behavior
+  and clears prompt/prompt-cache (`docs/deferred-todo-work.md:239-261`). Phase 2 keeps this behavior
   byte-for-byte as the legacy authority's existing terminal cleanup path; classification/ownership of
-  that sweep is deferred (`docs/archive/deferred-todo-work.md:181-196`) and remains a Phase 2 known-unknown
+  that sweep is deferred (`docs/deferred-todo-work.md:246-261`) and remains a Phase 2 known-unknown
   (Section 8). Phase 2 may only route the `verification_prefix_unfit` result into this existing path;
   it must not re-scope or re-own it.
 - `common_sampler_sample_and_accept_n` sub-batch compatibility TODO:
   `server-context.cpp:4478-4486` — the post_decode guard throws if a `spec_i_batch` member lies
   outside the current view; the design names this as unresolved
-  (`COHORT_BATCHING_CONTROLLER_DESIGN.md:665`; `docs/archive/deferred-todo-work.md:125-140`). Phase 2 must keep the
+  (`COHORT_BATCHING_CONTROLLER_DESIGN.md:665`; `docs/deferred-todo-work.md:190-205`). Phase 2 must keep the
   guard and record the TODO in the plan's risk register; it must not remove or "fix" it.
 
 ### 3.8 `post_decode()` outcomes
@@ -371,10 +371,10 @@ at 4529 (Section 3.7), `try_activate_deferred_mtp` at 3511-3559 and its prompt-c
 ### 3.9 SET_LORA and deferred items
 
 - `SERVER_TASK_TYPE_SET_LORA` at `tools/server/server-context.cpp:3313-3325` writes
-  `params_base.lora_adapters` ungated (`docs/archive/deferred-todo-work.md:198-213`). Phase 2 **does not** gate it;
+  `params_base.lora_adapters` ungated (`docs/deferred-todo-work.md:263-278`). Phase 2 **does not** gate it;
   it only records it in the executor seam catalogue as a deferred boundary-gated model mutation
   (`COHORT_BATCHING_CONTROLLER_DESIGN.md:528`;
-  `COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:275`; `docs/archive/deferred-todo-work.md:203-213`).
+  `COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:275`; `docs/deferred-todo-work.md:268-278`).
 - Queue drain: `server_queue::start_loop()` drains tasks through `callback_new_task()` then calls
   `callback_update_slots()` (`tools/server/server-queue.cpp:125-208`; `server-context.cpp:1759-1760`
   wires `queue_tasks.on_update_slots`). Phase 2 must not change this drain-then-pump ordering.
@@ -868,16 +868,16 @@ sole runtime scheduling authority.").
    `docs/archive/COHORT_PROGRESS_DEBT_CONSOLIDATED_DELTA.md:10`).
 2. **`common_sampler_sample_and_accept_n` sub-batch compatibility TODO** —
    `tools/server/server-context.cpp:4478-4486` (design cites the TODO at
-   `COHORT_BATCHING_CONTROLLER_DESIGN.md:665`; deferred work at `docs/archive/deferred-todo-work.md:125-140`).
+   `COHORT_BATCHING_CONTROLLER_DESIGN.md:665`; deferred work at `docs/deferred-todo-work.md:190-205`).
    Phase 2 keeps the guard; do not "fix" it. UNVERIFIED whether any view geometry in Phase 2 can
    trigger it with the new manifest metadata; workers re-verify with the dormant geometry tests.
 3. **Decode-failure whole-context sweep deferred** — the 4401-4417 sweep is preserved verbatim;
-   its classification/ownership is deferred (`docs/archive/deferred-todo-work.md:174-196`) and is a Phase 2
+   its classification/ownership is deferred (`docs/deferred-todo-work.md:239-261`) and is a Phase 2
    known-unknown, not a Phase 2 change.
 4. **SET_LORA deferred** — the ungated `SERVER_TASK_TYPE_SET_LORA` write at 3313-3325 is preserved;
    boundary gating is deferred to the model-mutation classification
    (`COHORT_BATCHING_CONTROLLER_DESIGN.md:528`;
-   `COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:275`; `docs/archive/deferred-todo-work.md:198-213`).
+   `COHORT_BATCHING_PHASED_IMPLEMENTATION_PLAN.md:275`; `docs/deferred-todo-work.md:263-278`).
 5. **Fixture hashes are historical** — the fixture's recorded `source_hashes_sha256`
    (`tests/python/fixtures/cohort_batching_normal_manifest_baseline.json:23-32`) were captured
    against an earlier tree; re-verify before final gate (UNVERIFIED as byte hashes of the current

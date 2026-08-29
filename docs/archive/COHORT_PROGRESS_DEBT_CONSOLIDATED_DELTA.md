@@ -337,7 +337,7 @@ The new seam enables but does not absorb (COHORT_PROGRESS_DEBT_FIRST_PASS_FINDIN
 - Prompt-checkpoint DRAM-copy optimization.
 - Dynamic mid-decode MTP reconstruction.
 
-All remain in `deferred-todo-work.md`. The active refactor preserves the complete verification-prefix limitation and existing cache/speculative/model/backend mechanics (COHORT_PROGRESS_DEBT_FIRST_PASS_FINDINGS.md:247). None of these enter any phase of the active plan (COHORT_PROGRESS_DEBT_AUTHORITY_REVIEW.md:277-284).
+All remain in `../deferred-todo-work.md`. The active refactor preserves the complete verification-prefix limitation and existing cache/speculative/model/backend mechanics (COHORT_PROGRESS_DEBT_FIRST_PASS_FINDINGS.md:247). None of these enter any phase of the active plan (COHORT_PROGRESS_DEBT_AUTHORITY_REVIEW.md:277-284).
 
 ## 10. Open items remaining after this delta
 

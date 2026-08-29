@@ -244,7 +244,7 @@ The new seam enables but does not absorb:
 - Prompt-checkpoint DRAM-copy optimization.
 - Dynamic mid-decode MTP reconstruction.
 
-All remain in `deferred-todo-work.md`. The active refactor preserves the complete verification-prefix limitation and existing cache/speculative/model/backend mechanics.
+All remain in `../deferred-todo-work.md`. The active refactor preserves the complete verification-prefix limitation and existing cache/speculative/model/backend mechanics.
 
 ## Proposed active-document rewrite boundary
 

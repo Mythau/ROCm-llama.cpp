@@ -1,7 +1,8 @@
 # Deferred todo work
 
-This catalogue owns later investigations and optimizations that are outside
-the currently reviewed implementation plans.
+This catalogue is the active backlog of investigations and optimizations that
+remain to be done. Current execution work is centered on decode; items here
+remain active even when they are not part of the present decode campaign.
 
 ## Target KV and serving memory
 
@@ -32,6 +33,70 @@ concurrency and fragmentation benchmarks against the current unified cache.
 Keep this track isolated from the completed DP-01 through DP-07 implementation.
 
 ## Model execution
+
+### llama-server prefill execution and scheduling deficit
+
+Investigate the repeatable gap between `llama-bench` and the one-slot
+`llama-server` prompt path on the clean cumulative ROCm runtime. With the same
+Qwen3.6 Q8 model and `-p 8192 -b 8192 -ub 1024` geometry, `llama-bench`
+completes the prompt in about 1220 ms (6714.72 prompt tok/s), while the
+server's internal prompt timer takes about 1458 ms (5618.00 prompt tok/s).
+That leaves approximately **238 ms per 8K prompt**, or about 30 ms per
+physical 1024-token microbatch, inside the server's prompt-processing
+boundary. The server then takes another 110.53 ms on average to reach first
+streamed content. Two independent one-slot server processes, with three
+measured waves each, reproduced the result.
+
+Do not assign the 238 ms to scheduling by subtraction alone: the benchmark
+and server have different graph, state, output and lifecycle contracts. Use a
+matched one-slot ROCm trace to account for every physical microbatch across
+CPU graph preparation/reuse, recurrent and KV state preparation, backend
+submission, GPU execution, queue gaps, synchronization, logits/output
+selection and completion. First distinguish extra executed GPU work from
+host- or dependency-induced queue idle; then optimize the largest demonstrated
+mechanism.
+
+Concurrent server prefill is not the cause of the deficit. The retained
+measurements reach 5704.28 aggregate prompt tok/s for eight 8K prompts at
+u1024 and 5996.89 at u1536, respectively 9.23% and 14.84% above the one-slot
+external rate. This indicates that part of the server cost is amortizable.
+The u1536 result used speculation-disabled pure prefill; MTP-enabled larger
+microbatches remain blocked by the pre-existing HIP argsort shared-memory
+assertion. Treat microbatch tuning, MTP resource selection and the internal
+238-ms attribution as distinct work.
+
+Evidence is retained in
+`2026-08-29/q8-cumulative-candidate/prefill-server-p1-analysis.json` and the
+prefill sections of `2026-08-29/q8-cumulative-candidate/RESULT.md`. The clean
+cumulative specializations selected zero times during sustained prefill, so
+this is not a regression introduced by those XTX decode kernels.
+
+### Routed-MoE prefill kernel and work-shaping improvements
+
+Evaluate the pre-existing AMD, upstream llama.cpp and Zinc routed-MoE prefill
+work before designing a new kernel. The relevant mechanisms are tokens-per-
+expert-aware MMQ tile sizing, compacted active-expert tiling, deduplication of
+gate/up activation quantization, GPU-resident expert routing and batched expert
+grids. Zinc's cross-token batched MoE and K-parallel shaders are useful design
+and negative-result references even where their Vulkan/Metal Q4 layouts cannot
+be transplanted directly into the HIP Q8_0 path.
+
+Start from the existing candidate set recorded in
+`CUSTOM-ROCM-LLAMACPP-RESEARCH-PLAN.md`, including AMD's reported routed-MoE
+MMQ prefill improvements and upstream PRs #26284, #24546 and #25441. Audit the
+local AMD research branch and Zinc implementation before authoring code, then
+benchmark the actual Qwen3.6 Q8 A3B production path on gfx1100 and gfx1201.
+Sweep physical microbatch size and tokens-per-expert distribution, and measure
+expert compaction cost, activation quantization count, MMQ occupancy, kernel
+time and end-to-end prompt throughput. Retain separate fresh-context,
+deep-context/chunked and server measurements so a kernel gain is not confused
+with cache state or scheduling.
+
+This is independent of the approximately 238 ms `llama-server` prompt-path
+deficit above. A faster MoE prefill kernel should improve both `llama-bench`
+and `llama-server`; it does not explain a server-only gap unless a matched
+trace demonstrates different kernel selection, expert work shaping or GPU
+execution between the two paths.
 
 ### Cohort-tiled layer-wavefront prefill
 
