@@ -222,7 +222,8 @@ static void launch_gated_delta_net(
 }
 
 static void ggml_cuda_op_gated_delta_net_impl(
-        ggml_backend_cuda_context & ctx, ggml_tensor * dst, const ggml_cuda_gated_delta_net_fused_cache * cache) {
+        ggml_backend_cuda_context & ctx, ggml_tensor * dst,
+        const ggml_cuda_gated_delta_net_fused_cache * cache, bool direct_state = false) {
     ggml_tensor * src_q     = dst->src[0];
     ggml_tensor * src_k     = dst->src[1];
     ggml_tensor * src_v     = dst->src[2];
@@ -293,6 +294,14 @@ static void ggml_cuda_op_gated_delta_net_impl(
     if (cache != nullptr) {
         state_d           = cache->data;
         state_slot_stride = cache->slot_stride;
+        if (direct_state) {
+            // The graph plan proved that GET_ROWS selects the only state slot,
+            // the fused copy writes that same persistent allocation, and no
+            // other node consumes the gathered 2 MiB tensor. Read and update
+            // the persistent slot directly instead of materializing the gather.
+            GGML_ASSERT(K == 1 && n_tokens == 1 && n_seqs == 1 && cache->slot_stride == 0);
+            s_d = cache->data;
+        }
     }
 
     if (ggml_cuda_gdn_chunked_supported(kda, keep_rs, S_v, n_tokens)) {
@@ -350,4 +359,10 @@ void ggml_cuda_op_gated_delta_net(ggml_backend_cuda_context & ctx, ggml_tensor *
 void ggml_cuda_op_gated_delta_net_fused_cache(
         ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_cuda_gated_delta_net_fused_cache cache) {
     ggml_cuda_op_gated_delta_net_impl(ctx, dst, &cache);
+}
+
+void ggml_cuda_op_gated_delta_net_fused_cache_direct(
+        ggml_backend_cuda_context & ctx, ggml_tensor * dst,
+        ggml_cuda_gated_delta_net_fused_cache cache) {
+    ggml_cuda_op_gated_delta_net_impl(ctx, dst, &cache, true);
 }

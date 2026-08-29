@@ -239,3 +239,55 @@ void ggml_cuda_op_ssm_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst, g
         }
     }
 }
+
+
+// Decode-only split-input convolution. The execution plan proves that the
+// three history rows and one new row feed only the history update and this
+// conv+SiLU chain. One launch therefore consumes both allocations directly,
+// preserves tap order, writes the shifted persistent history, and avoids the
+// CONCAT materialization, update copy, generic convolution, and SiLU launch.
+template <size_t split_d_inner, size_t d_conv>
+static __global__ void ssm_conv_split_state_fused_f32(
+        const float * state, const float * input, const float * weights,
+        float * state_out, float * output,
+        size_t state_nb0, size_t state_nb1, size_t input_nb0, size_t weight_nb1) {
+    const int channel = blockIdx.x * split_d_inner + threadIdx.x;
+    const size_t state_chan = state_nb0 / sizeof(float);
+    const size_t state_time = state_nb1 / sizeof(float);
+    const size_t input_chan = input_nb0 / sizeof(float);
+    const size_t weight_chan = weight_nb1 / sizeof(float);
+    float x[d_conv];
+#pragma unroll
+    for (size_t j = 0; j < d_conv - 1; ++j) {
+        x[j] = state[channel * state_chan + j * state_time];
+    }
+    x[d_conv - 1] = input[channel * input_chan];
+    float sum = 0.0f;
+#pragma unroll
+    for (size_t j = 0; j < d_conv; ++j) {
+        sum += x[j] * weights[channel * weight_chan + j];
+    }
+    output[channel] = ggml_cuda_op_silu_single(sum);
+#pragma unroll
+    for (size_t j = 0; j < d_conv - 1; ++j) {
+        state_out[j * gridDim.x * split_d_inner + channel] = x[j + 1];
+    }
+}
+
+void ggml_cuda_op_ssm_conv_split_state_fused(
+        ggml_backend_cuda_context & ctx, ggml_tensor * conv,
+        ggml_tensor * state_input, ggml_tensor * new_input,
+        ggml_tensor * state_copy, ggml_tensor * silu) {
+    ggml_tensor * weights = conv->src[1];
+    GGML_ASSERT(ggml_ssm_conv_get_layout(conv) == GGML_SSM_CONV_LAYOUT_CHANNELS_MAJOR);
+    GGML_ASSERT(weights->ne[0] == 4 && weights->ne[1] == 8192);
+    GGML_ASSERT(state_input->ne[0] == 8192 && state_input->ne[1] == 3 &&
+                new_input->ne[0] == 8192 && new_input->ne[1] == 1);
+    GGML_ASSERT(state_input->type == GGML_TYPE_F32 && new_input->type == GGML_TYPE_F32 &&
+                state_copy->type == GGML_TYPE_F32 && silu->type == GGML_TYPE_F32);
+    const ggml_cuda_kernel_launch_params params(dim3(8192 / 128), dim3(128), 0, ctx.stream());
+    ggml_cuda_kernel_launch(ssm_conv_split_state_fused_f32<128, 4>, params,
+        (const float *) state_input->data, (const float *) new_input->data,
+        (const float *) weights->data, (float *) state_copy->data, (float *) silu->data,
+        state_input->nb[0], state_input->nb[1], new_input->nb[0], weights->nb[1]);
+}

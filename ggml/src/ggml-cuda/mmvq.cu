@@ -4,6 +4,10 @@
 #include "vecdotq.cuh"
 
 #include <cstdint>
+#include "q8-row-owned.cuh"
+#ifdef GGML_CUMULATIVE_VERIFY
+extern "C" void ggml_cumulative_count(int kind, int device);
+#endif
 
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
 
@@ -1177,7 +1181,7 @@ static void mul_mat_vec_q_switch_type(
 
 void ggml_cuda_mul_mat_vec_q(
         ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst,
-        const ggml_cuda_mm_fusion_args_host * fusion) {
+        const ggml_cuda_mm_fusion_args_host * fusion, bool row_owned) {
     GGML_ASSERT(        src1->type == GGML_TYPE_F32);
     GGML_ASSERT(        dst->type  == GGML_TYPE_F32);
     GGML_ASSERT(!ids || ids->type  == GGML_TYPE_I32); // Optional, used for batched GGML_MUL_MAT_ID.
@@ -1295,6 +1299,23 @@ void ggml_cuda_mul_mat_vec_q(
         quantize_row_q8_1_cuda(src1_d, nullptr, q8_dst, src0->type, ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
         src1_q8_d = q8_dst;
     }
+
+
+#ifndef GGML_CUMULATIVE_DISABLE_QKV
+    if (row_owned && GGML_CUDA_CC_IS_RDNA3_0(ggml_cuda_info().devices[ctx.device].cc) &&
+        src0->type == GGML_TYPE_Q8_0 && ids == nullptr && fusion == nullptr &&
+        ne00 == 2048 && ne01 == 8192 && ne02 == 1 && ne03 == 1 &&
+        ne10 == 2048 && ne11 == 1 && ne12 == 1 && ne13 == 1 &&
+        ggml_is_contiguous(src0) && ggml_is_contiguous(dst)) {
+#ifdef GGML_CUMULATIVE_VERIFY
+        ggml_cumulative_count(0, ctx.device);
+#endif
+        const ggml_cuda_kernel_launch_params params(dim3(1024, 1, 1), dim3(32, 8, 1), 0, stream);
+        ggml_cuda_kernel_launch(q8_0_2048x8192_row_owned_rdna3, params,
+            src0->data, (const block_q8_1 *) src1_q8_d, dst_d);
+        return;
+    }
+#endif
 
     const int64_t s01 = src0->nb[1] / ts_src0;
     const int64_t s11 = ne10_padded / QK8_1;
